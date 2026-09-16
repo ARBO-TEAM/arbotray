@@ -71,7 +71,7 @@ Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, 
 | `theme.font_size`, `theme.opacity` | Point size; `opacity: 0` samples the taskbar background |
 | `quota_gb` | Monthly allowance. `0` disables the over-quota warning |
 | `widget.enabled` | Show the desktop widget on startup |
-| `widget.show.*` | Which blocks it draws: `net`, `latency`, `hardware`, `network`, `usage`, `system` |
+| `widget.show.*` | Which blocks it draws: `net`, `latency`, `hardware`, `sensors`, `network`, `usage`, `system`. Only `net` and `hardware` are on by default |
 | `widget.x` / `widget.y` | Remembered corner, in screen pixels. `null` picks the work area's top-right |
 | `widget.always_on_top` | Keep the panel above other windows |
 
@@ -87,7 +87,9 @@ The close box hides the panel without clearing the setting, so the checkbox stay
 
 Blocks are switched with `widget.show.*`, one flag per group of rows, and a row whose reading is blank is dropped rather than drawn as a zero — a desktop with no battery gets no `Battery` line. A block that loses every row takes its heading with it.
 
-`theme.opacity` means "sample the taskbar" for the strip and nothing at all for a floating window, so the panel reads `0` as fully opaque instead of leaving itself invisible.
+Only two blocks are on by default — **Traffic** and **Usage** (CPU and RAM) — because a panel with all seven in it is a window rather than something you glance at. The rest, including `sensors` (GPU, battery, power), are one flag away.
+
+`theme.opacity` means "sample the taskbar" for the strip and nothing at all for a floating window, so the panel reads `0` as its own translucent default — about three-quarters opaque. The desk shows through it and the numbers stay legible, because a layered window fades the text along with the background and the contrast between them is unchanged.
 
 ## Data usage
 

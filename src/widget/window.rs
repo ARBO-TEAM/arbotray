@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
     IsWindowVisible, LWA_ALPHA, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE,
     WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
@@ -191,12 +191,7 @@ impl Widget {
             } else {
                 HWND_NOTOPMOST
             });
-            let flags = if resize {
-                SWP_NOMOVE | SWP_NOACTIVATE
-            } else {
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
-            };
-            let _ = SetWindowPos(self.hwnd, insert, 0, 0, w, h, flags);
+            let _ = SetWindowPos(self.hwnd, insert, 0, 0, w, h, style_flags(resize));
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
     }
@@ -216,15 +211,46 @@ impl Widget {
     }
 }
 
+/// The flags `style` restyles with.
+///
+/// `SWP_NOMOVE` is in **both** cases, and it is the only reason this is a
+/// function instead of an expression: the x/y arguments below are placeholders,
+/// so a call without it teleports the panel to the top-left corner — which is
+/// exactly what it did the first time, on the `create` call that runs before
+/// anyone has moved it. `SWP_NOZORDER` is in neither, so the top-most choice
+/// actually takes effect.
+///
+/// Split out because a winit-free test cannot press a window's buttons, but it
+/// can assert the one flag whose absence is invisible until you look at where
+/// the panel ended up.
+fn style_flags(resize: bool) -> windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS {
+    if resize {
+        SWP_NOMOVE | SWP_NOACTIVATE
+    } else {
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+    }
+}
+
+/// The alpha a panel with no opacity set of its own opens at.
+///
+/// Deliberately see-through rather than opaque: the panel is meant to sit on the
+/// desktop without taking it over, and the readings stay legible because the
+/// background goes translucent *with* the text, which keeps the contrast between
+/// them — a light grey on black reads the same at 74% as at 100%, only dimmer.
+/// `LWA_ALPHA` fades the whole window, so this is the setting where the desktop
+/// shows through and the numbers still hold; below about 150 they start to
+/// disappear against a busy wallpaper.
+const DEFAULT_ALPHA: u8 = 190;
+
 /// The panel's alpha.
 ///
 /// `opacity: 0` means "sample the taskbar" for the strip, but there is nothing
-/// to sample behind a floating window — reading it as 255 keeps one config
-/// meaning one thing per surface, where a panel at zero alpha would just look
-/// like the feature was broken.
+/// to sample behind a floating window, so it reads as the panel's own
+/// translucent default. Any non-zero value is the user's and is taken as given,
+/// so one config still means one thing per surface.
 fn alpha(cfg: &Config) -> u8 {
     if cfg.theme.opacity == 0 {
-        255
+        DEFAULT_ALPHA
     } else {
         cfg.theme.opacity
     }
@@ -524,12 +550,40 @@ mod tests {
     }
 
     #[test]
-    fn zero_opacity_means_opaque_here_and_not_invisible() {
+    fn a_restyle_never_moves_the_panel() {
+        // The regression this exists for: `style` passes 0,0 as the x/y
+        // arguments because it only ever means to resize, re-order or re-alpha.
+        // A call without `SWP_NOMOVE` therefore parks the panel in the corner —
+        // which is what happened on the `create` call, before the user had a
+        // chance to drag it anywhere.
+        for resize in [true, false] {
+            let flags = style_flags(resize).0;
+            assert!(
+                flags & SWP_NOMOVE.0 != 0,
+                "resize={resize} may not move the window"
+            );
+            assert_eq!(
+                flags & windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER.0,
+                0,
+                "resize={resize} must let the top-most choice through"
+            );
+        }
+        // And the size only rides along on the call that means it.
+        assert_eq!(style_flags(true).0 & SWP_NOSIZE.0, 0);
+        assert_ne!(style_flags(false).0 & SWP_NOSIZE.0, 0);
+    }
+
+    #[test]
+    fn an_unset_opacity_gives_the_panel_its_own_translucency() {
+        // Not 255: the panel is meant to show the desktop through it, and not 0
+        // either, which `LWA_ALPHA` would read as "invisible" — the two failures
+        // this sits between.
         let mut cfg = Config::default();
         cfg.theme.opacity = 0;
-        assert_eq!(alpha(&cfg), 255);
+        assert_eq!(alpha(&cfg), DEFAULT_ALPHA);
+        assert!(DEFAULT_ALPHA > 0 && DEFAULT_ALPHA < 255);
         cfg.theme.opacity = 128;
-        assert_eq!(alpha(&cfg), 128);
+        assert_eq!(alpha(&cfg), 128, "an explicit opacity is the user's");
     }
 
     #[test]
