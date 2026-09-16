@@ -197,6 +197,47 @@ pub fn rows(model: &TrayModel, w: &Widget) -> Vec<Row> {
     out
 }
 
+/// A model whose readings are as wide as the enabled blocks are likely to get.
+///
+/// Sizing the panel from the live sample means it widens the moment a rate
+/// gains a digit and narrows again when it loses one — a twitch, once a second,
+/// which the paint path already claims not to do. The strip reserves its width
+/// from the same idea (`dock::worst_case`); this is the widget's half of it.
+///
+/// Every string is deliberately generous rather than exact. Over-reserving
+/// costs a few pixels of width, permanently and invisibly; under-reserving
+/// clips a reading, which is the one failure that would matter.
+pub fn worst_case() -> TrayModel {
+    TrayModel {
+        down_text: "999.9M/s".into(),
+        up_text: "999.9M/s".into(),
+        latency_text: "9999ms".into(),
+        internet_text: "9999ms".into(),
+        loss_text: "100%".into(),
+        cpu_text: "100%".into(),
+        ram_text: "100%".into(),
+        gpu_text: "100%".into(),
+        battery_text: "100% (charging)".into(),
+        power_text: "999.9W".into(),
+        adapter_text: "Wi-Fi 6E 9999".into(),
+        wifi_text: "6G 100%".into(),
+        wifi_name: Some("WLAN-9999999999".into()),
+        ip_text: "255.255.255.255".into(),
+        gateway_text: "255.255.255.255".into(),
+        dns_text: "255.255.255.255".into(),
+        usage_text: "9999.9G".into(),
+        month_text: "9999.9G".into(),
+        computer_text: "DESKTOP-99999999".into(),
+        windows_text: "Windows 11 Pro 99999".into(),
+        cpu_name_text: "AMD Ryzen 9 9999X 99-Core Processor".into(),
+        cores_text: "99 cores, 99 threads".into(),
+        uptime_text: "999d 99h 99m".into(),
+        disks: vec![("C:".into(), "9999G free of 9999G".into())],
+        usage_days: vec![("Mon 99".into(), 9_999_999_999)],
+        ..Default::default()
+    }
+}
+
 /// A day's byte total in the units the strip already uses.
 ///
 /// A miniature of the taskbar's formatter rather than a call into it: that one
@@ -369,6 +410,39 @@ mod tests {
                 "missing {heading}"
             );
         }
+    }
+
+    #[test]
+    fn the_reserved_width_covers_every_row_a_sample_can_produce() {
+        // The panel's window is measured from `worst_case`, so a block that
+        // gains a label without gaining a field there would be clipped the first
+        // time it had a reading to draw — the one failure that over-reserving
+        // cannot cause and this catches.
+        let labels = |m: &TrayModel| -> Vec<String> {
+            rows(m, &all())
+                .into_iter()
+                .filter(|r| !r.label.is_empty())
+                .map(|r| r.label)
+                .collect()
+        };
+        let reserved = labels(&worst_case());
+        for label in labels(&model()) {
+            assert!(reserved.contains(&label), "no width reserved for {label}");
+        }
+        // And the headings, so a block whose every row is blank in the worst
+        // case does not come out narrower than one that is not.
+        let headings = |m: &TrayModel| -> Vec<String> {
+            rows(m, &all())
+                .into_iter()
+                .filter(|r| r.role == Role::Title)
+                .map(|r| r.value)
+                .collect()
+        };
+        assert_eq!(headings(&worst_case()), headings(&{
+            let mut m = model();
+            m.gpu_text = "7%".into();
+            m
+        }));
     }
 
     #[test]

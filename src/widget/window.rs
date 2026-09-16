@@ -12,7 +12,7 @@
 
 use super::metrics::{BLOCK_GAP, CLOSE, CLOSE_INSET, COL_GAP, MARGIN, PAD};
 use super::render::Renderer;
-use super::rows::{Role, Row, rows};
+use super::rows::{Role, Row, rows, worst_case};
 use crate::config::Config;
 use crate::taskbar::TrayModel;
 use std::ffi::c_void;
@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, GetWindowRect, HTCAPTION, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
     IsWindowVisible, LWA_ALPHA, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongPtrW,
+    SWP_NOMOVE, SWP_NOSIZE, SetLayeredWindowAttributes, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE,
     WM_NCHITTEST, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
 };
@@ -62,6 +62,19 @@ struct WidgetState {
     /// landed without laying the panel out again.
     rows: Vec<Row>,
     close: CloseBox,
+    /// The config the panel was last built from — kept, not just passed
+    /// through, because the window procedure is the only thing that sees the
+    /// end of a drag and it needs something to write the new corner into.
+    cfg: Config,
+    /// The window's size, measured once per config change from
+    /// [`rows::worst_case`] rather than from the sample on screen.
+    ///
+    /// Held here rather than derived at each use, because it is the one number
+    /// that must *not* follow the readings: a panel sized from the live sample
+    /// gains a few pixels when a rate crosses 100M and gives them back a second
+    /// later, and a window that nudges itself every other tick is worse than a
+    /// few permanently reserved pixels.
+    size: (i32, i32),
 }
 
 /// The panel, or the fact that there is not one.
@@ -80,13 +93,15 @@ impl Widget {
     pub fn create(cfg: &Config, model: &TrayModel, instance: HINSTANCE) -> Option<Self> {
         register_class(instance);
         let renderer = Renderer::new(cfg, dpi_of_desktop());
-        let rows = rows(model, &cfg.widget);
-        let (w, h) = renderer.size(&rows);
+        let size = renderer.size(&rows(&worst_case(), &cfg.widget));
+        let (w, h) = size;
         let (x, y) = placement(cfg, w, h);
         let state = Box::new(WidgetState {
             renderer,
-            rows,
+            rows: rows(model, &cfg.widget),
             close: CloseBox::default(),
+            cfg: cfg.clone(),
+            size,
         });
 
         // SAFETY: `state` is a live `Box` moved into the returned `Widget`, so
@@ -146,27 +161,41 @@ impl Widget {
         }
     }
 
-    /// Repaint from a new sample, resizing only when the layout's own size
-    /// changed — a panel that resized every tick would twitch as digits moved.
+    /// Repaint from a new sample.
+    ///
+    /// Deliberately never resizes: the window is measured from the worst case
+    /// once per config change, so a rate that gains a digit repaints into room
+    /// that was already reserved for it. See `size`.
     pub fn update(&mut self, model: &TrayModel, cfg: &Config) {
-        let old = self.state.renderer.size(&self.state.rows);
         self.state.rows = rows(model, &cfg.widget);
-        let new = self.state.renderer.size(&self.state.rows);
         // SAFETY: our own live window.
         unsafe {
-            if old != new {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    None,
-                    0,
-                    0,
-                    new.0,
-                    new.1,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
-            }
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
+        self.remember_position();
+    }
+
+    /// Note where the panel now is, for the next launch to open at.
+    ///
+    /// Called after a repaint because that is when Windows has finished any
+    /// move it was running — the caption's own drag loop, including the snap it
+    /// does at the end — and a panel that never moved writes the same two
+    /// numbers back, which `remember_position` sees and skips.
+    fn remember_position(&mut self) {
+        let Some((x, y)) = self.position() else {
+            return;
+        };
+        if self.state.cfg.widget.x == Some(x) && self.state.cfg.widget.y == Some(y) {
+            return;
+        }
+        self.state.cfg.widget.x = Some(x);
+        self.state.cfg.widget.y = Some(y);
+        // The file is the only thing that has to agree: nothing else in the
+        // process reads the panel's corner, and the settings page compares
+        // against `DEFAULT_JSON`, not against this. A failed write is not worth
+        // a message — the panel is still where the user put it, and the cost of
+        // the failure is only that the corner is forgotten.
+        let _ = self.state.cfg.save();
     }
 
     /// Rebuild fonts, rows and geometry after a theme or widget edit.
@@ -174,15 +203,27 @@ impl Widget {
     /// `resize` is separate because a config that changed only the alpha has no
     /// reason to move the window, and moving it would undo a drag the user just
     /// finished for no visible gain.
+    ///
+    /// The panel's own `x`/`y` are carried over from what it was already built
+    /// with rather than taken from `cfg`: the settings page knows nothing about
+    /// where the panel is, so its copy of those two fields is stale, and
+    /// adopting it here would yank the panel back to where it sat when the page
+    /// was opened — or to the corner, on a first run.
     pub fn apply(&mut self, cfg: &Config, model: &TrayModel, resize: bool) {
-        self.state.renderer = Renderer::new(cfg, dpi_of_desktop());
+        let mut cfg = cfg.clone();
+        cfg.widget.x = self.state.cfg.widget.x;
+        cfg.widget.y = self.state.cfg.widget.y;
+        self.state.renderer = Renderer::new(&cfg, dpi_of_desktop());
         self.state.rows = rows(model, &cfg.widget);
-        self.style(cfg, resize);
+        let size = self.state.renderer.size(&rows(&worst_case(), &cfg.widget));
+        self.state.size = size;
+        self.style(&cfg, resize);
+        self.state.cfg = cfg;
     }
 
-    /// Alpha, top-most, and the size when the layout may have changed.
+    /// Alpha, top-most, and the size the panel was last measured at.
     fn style(&self, cfg: &Config, resize: bool) {
-        let (w, h) = self.state.renderer.size(&self.state.rows);
+        let (w, h) = self.state.size;
         // SAFETY: our own live window; the handle outlives the call.
         unsafe {
             let _ = SetLayeredWindowAttributes(self.hwnd, COLORREF(0), alpha(cfg), LWA_ALPHA);
