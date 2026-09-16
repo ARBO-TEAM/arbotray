@@ -7,19 +7,21 @@
 //! and the Settings captions have to sit on the bands that `layout_settings`
 //! put the controls on.
 
-use crate::ui::components::{Canvas, Fonts};
-use crate::ui::design::{S3, palette};
+use crate::ui::components::{Canvas, Fonts, draw};
+use crate::ui::design::{S2, S3, palette};
 use crate::ui::pages::{
-    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, SYSTEM, page_rows, page_section, page_shows_graph,
-    usage_rows,
+    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, page_rows, page_section,
+    page_shows_graph, usage_rows,
 };
 use crate::ui::settings::{SET_ROW_LABELS, foot_button_top};
 use crate::ui::theme::scale;
-use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState};
+use crate::ui::{
+    CLOCK_EXTRA, PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState,
+};
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject, HGDIOBJ,
-    NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, TRANSPARENT,
+    CreateSolidBrush, DEFAULT_GUI_FONT, DT_LEFT, DeleteObject, FillRect, GetDC, GetStockObject,
+    HGDIOBJ, NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -77,6 +79,7 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             // is not worth one header above a day list.
             // ponytail: caption == body; add a face when a page needs two.
             caption: state.font,
+            clock: state.clock,
         };
         // The heading gets its own band — a title is larger than a row and has
         // air under it — and everything after it is rows on `row_h` bands,
@@ -236,6 +239,47 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                     }
                     c.row(when, result);
                 }
+            }
+        }
+
+        // The Stopwatch page. Its whole content is the clock, so it is drawn
+        // where the button that drives it sits rather than in the row list: a
+        // clock is a readout *and* a control, and a number up here with its
+        // Start 400 pixels below it in the corner would read as two features.
+        // The button itself is a real child window, placed at the foot by
+        // `layout_settings`.
+        if page == STOPWATCH {
+            let running = state.watch.is_running();
+            let resting = !running && state.watch.elapsed().is_zero();
+            // `section`, not `row`: the caption takes a band of its own and
+            // rules off from it, so a face taller than a row has somewhere to
+            // stand. A `row` would put the label beside a value already drawn
+            // large underneath it, which is the same number twice.
+            c.section("Elapsed");
+            let digits = state.watch.text(running);
+            // The clock goes through `draw` rather than a `Canvas` method: its
+            // face is taller than a row, and the canvas would clip it to the
+            // band's own height. One absolute rectangle is simpler than a
+            // component whose only caller has a different band size.
+            SetTextColor(dc, pal.text);
+            draw(
+                dc,
+                fonts.clock,
+                &digits,
+                x0,
+                c.y() + scale(S3, state.dpi),
+                x1,
+                DT_LEFT,
+            );
+            // The clock's own height, not a row's: a face this size would be
+            // clipped by a band laid out for one line of body text, and the
+            // hint below it would then be drawn through it.
+            c.space(scale(CLOCK_EXTRA + 2 * S2, state.dpi));
+            // The hint goes at the foot, under the buttons, rather than beside
+            // the clock: at the top it would be read as a caption for the
+            // zero it is standing next to.
+            if resting {
+                c.empty("Press Start to begin.");
             }
         }
 

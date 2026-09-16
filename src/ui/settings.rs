@@ -5,11 +5,12 @@ use crate::config::{
 };
 use crate::ui::consts::{
     BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_BG, SET_FG, SET_FONT, SET_INTERVAL,
-    SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, TILE_IDS,
-    TILE_LABELS, WM_ENABLE,
+    SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_WATCH,
+    SET_WATCH_RESET, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
+use crate::ui::stopwatch::Stopwatch;
 use crate::ui::theme::{scale, sidebar_w};
 use crate::ui::UiState;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
@@ -335,6 +336,12 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     // Same path, same separation: `show_controls` is the one place the split is
     // spelled out.
     create_control(parent, state, w!("BUTTON"), "Stop process", button_style, SET_STOP);
+    // The Stopwatch page's two, and the first controls here whose *text* is
+    // state rather than a fixed caption: the first says Start or Stop and the
+    // second is a caption. `sync_watch_button` is what keeps the first one
+    // honest, and it is called from the same places the clock is.
+    create_control(parent, state, w!("BUTTON"), "Start", button_style, SET_WATCH);
+    create_control(parent, state, w!("BUTTON"), "Reset", button_style, SET_WATCH_RESET);
 
     write_form(parent, &state.cfg);
 }
@@ -517,11 +524,19 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         // machine — a control on a band would end up underneath a row the
         // moment the page grew one.
         let foot = foot_button_top(h, state.dpi);
+        // Two columns, two rows. Every one of the four is placed on every
+        // layout, so no two may share a rectangle — they belong to different
+        // pages and only two are ever shown, but "shown" is not something this
+        // function gets to know.
+        //
+        // Wrapped rather than run along one line because the content column is
+        // only `MIN_W - SIDEBAR_W - 2 * PAD` = 470 wide at the narrowest window
+        // and its floor: four 150-wide fields with a gap each is 630, which
+        // would push the last two off the edge of the column entirely.
         place(hwnd, SET_SPEED, x0, foot, field_w, ctl_h);
-        // Alongside the Run button rather than on top of it: the two belong to
-        // different pages and only one is ever shown, but both are placed on
-        // every layout, so they cannot share a rectangle.
         place(hwnd, SET_STOP, x0 + field_w + gap, foot, field_w, ctl_h);
+        place(hwnd, SET_WATCH, x0, foot + ctl_h + gap, field_w, ctl_h);
+        place(hwnd, SET_WATCH_RESET, x0 + field_w + gap, foot + ctl_h + gap, field_w, ctl_h);
         // A second run while one is in flight is refused by `SpeedTest::start`
         // anyway; disabling it here is what says so before the click rather
         // than after it. Refreshed per tick by `ui::update`, because the run
@@ -588,6 +603,8 @@ pub(crate) fn control_ids() -> Vec<i32> {
     ids.extend(FIELD_ROWS.iter().map(|(id, _)| *id));
     ids.push(SET_SPEED);
     ids.push(SET_STOP);
+    ids.push(SET_WATCH);
+    ids.push(SET_WATCH_RESET);
     ids
 }
 
@@ -619,9 +636,11 @@ pub(crate) fn show_controls(hwnd: HWND, page: usize) {
     // the split between "the Settings page's controls" and "the rest" is
     // written down, and a third page-owned control should be a row here rather
     // than another branch in two places.
-    let elsewhere: [(i32, bool); 2] = [
+    let elsewhere: [(i32, bool); 4] = [
         (SET_SPEED, page == crate::ui::pages::SPEEDTEST),
         (SET_STOP, page == crate::ui::pages::PORTS),
+        (SET_WATCH, page == crate::ui::pages::STOPWATCH),
+        (SET_WATCH_RESET, page == crate::ui::pages::STOPWATCH),
     ];
     // SAFETY: every id names one of our own children; `ShowWindow` on a child
     // only changes its visibility.
@@ -635,6 +654,24 @@ pub(crate) fn show_controls(hwnd: HWND, page: usize) {
             if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
                 let _ = ShowWindow(ctl, if show { SW_SHOW } else { SW_HIDE });
             }
+        }
+    }
+}
+
+/// Make the Stopwatch page's first button say what the clock is doing.
+///
+/// The one control in this window whose caption is state rather than a fixed
+/// label. It reads the clock rather than being handed a flag, so there is no
+/// way to pass the wrong one: the caption is derived from the same value the
+/// page paints, and a second copy of "is it running" cannot come apart from it.
+pub(crate) fn sync_watch_button(hwnd: HWND, state: &UiState) {
+    let label = Stopwatch::label(state.watch.is_running());
+    let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `hwnd` is our own window, `wide` outlives the call, and the id
+    // names one of our own children.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), SET_WATCH) {
+            let _ = SetWindowTextW(ctl, PCWSTR(wide.as_ptr()));
         }
     }
 }

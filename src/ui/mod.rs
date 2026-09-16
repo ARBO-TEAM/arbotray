@@ -36,6 +36,7 @@ mod pages;
 mod paint;
 mod settings;
 mod sidebar;
+mod stopwatch;
 mod theme;
 
 pub(crate) use consts::*;
@@ -43,6 +44,7 @@ pub(crate) use fonts::*;
 pub(crate) use layout::*;
 pub(crate) use pages::*;
 pub(crate) use paint::*;
+pub(crate) use stopwatch::Stopwatch;
 pub(crate) use settings::*;
 pub(crate) use theme::*;
 // `sidebar` is deliberately not glob-re-exported: its `paint` would collide
@@ -68,12 +70,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetClientRect, GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, MINMAXINFO, MoveWindow,
-    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
-    SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE,
-    WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    GetClientRect, GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, KillTimer, MINMAXINFO,
+    MoveWindow, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
+    WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CLIPCHILDREN,
+    WS_OVERLAPPEDWINDOW,
 };
 use crate::telemetry::SpeedTest;
 use windows::core::w;
@@ -87,6 +90,10 @@ pub(crate) struct UiState {
     bold: HFONT,
     /// Page heading, a few points up from the body.
     title: HFONT,
+    /// The Stopwatch page's reading — the body face scaled up hard, because on
+    /// that page the reading is the entire content and a clock the height of a
+    /// row is not one you can read across a desk.
+    clock: HFONT,
     /// Which page is showing. The sidebar is painted from this, so it is the
     /// only record of the selection there is.
     page: usize,
@@ -160,6 +167,14 @@ pub(crate) struct UiState {
     /// Separate from `notice`, which belongs to the Settings page: a save's
     /// confirmation has no business appearing over a list of sockets.
     port_notice: Option<String>,
+    /// The Stopwatch page's clock, and the reason one page of this window
+    /// repaints on its own schedule rather than once per sample.
+    ///
+    /// It counts in real time while a run is going, so a tick that arrives a
+    /// second late is a tick a whole second of the display is missing. See
+    /// `TICK_MS`: the tray is asked to feed this window faster while it runs,
+    /// and the timer is never touched when it is not.
+    watch: Stopwatch,
 }
 
 
@@ -184,6 +199,7 @@ pub fn ensure(
         font: create_font(cfg, 96, 0, false),
         bold: create_font(cfg, 96, 1, true),
         title: create_font(cfg, 96, TITLE_EXTRA, true),
+        clock: create_font(cfg, 96, CLOCK_EXTRA, true),
         page: OVERVIEW,
         hover: None,
         tracking: false,
@@ -201,6 +217,7 @@ pub fn ensure(
         modal: Modal::default(),
         port_rows: Vec::new(),
         port_notice: None,
+        watch: Stopwatch::default(),
     });
     // Handed to the window, which owns it from here: `WM_NCDESTROY` turns this
     // back into a `Box` and drops it. Freeing it here instead would leave
@@ -480,6 +497,25 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         // the button greys out on the same click rather than on
                         // whatever the next sample happens to be.
                         let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if id == SET_WATCH {
+                        // One button for both directions. The clock is toggled
+                        // first and the caption is read back off it, so the two
+                        // cannot disagree.
+                        let running = s.watch.toggle();
+                        set_watch_timer(hwnd, running);
+                        sync_watch_button(hwnd, s);
+                        // The page is painted by us, so the reading the clock
+                        // stopped on — and the hint that goes away with it —
+                        // need a repaint that no sample is going to bring.
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if id == SET_WATCH_RESET {
+                        s.watch.reset();
+                        // Reset stops as well as zeroes, so this is also the
+                        // path that stops the clock beside putting the caption
+                        // back to "Start".
+                        set_watch_timer(hwnd, false);
+                        sync_watch_button(hwnd, s);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     } else if id == SET_RESET {
                         // Back to what is on disk — not to the built-in
                         // defaults, and not to whatever is running. The file is
@@ -669,6 +705,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
 
+            // The Stopwatch page's clock, and the only thing this window ever
+            // ticks on. Armed by a Start and killed by a Stop or a Reset, so it
+            // cannot arrive while the clock is paused — which is what keeps the
+            // page static when it should be, rather than repainting four
+            // identical frames a second.
+            WM_TIMER if wparam.0 == TIMER_WATCH => {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+
             // Painted edge to edge below; letting the default erase first is
             // exactly the flicker this avoids.
             WM_ERASEBKGND => LRESULT(1),
@@ -727,6 +773,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let _ = DeleteObject(HGDIOBJ(s.font.0));
                     let _ = DeleteObject(HGDIOBJ(s.bold.0));
                     let _ = DeleteObject(HGDIOBJ(s.title.0));
+                    let _ = DeleteObject(HGDIOBJ(s.clock.0));
                     let _ = DeleteObject(HGDIOBJ(s.face_brush.0));
                 }
                 LRESULT(0)
@@ -737,6 +784,40 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
+
+/// The window timer that keeps the Stopwatch page's clock moving, and how often
+/// it fires.
+///
+/// A hundred milliseconds, because the reading carries tenths while it runs —
+/// at a second the seconds digit would jump with the tenths frozen between
+/// them, which reads as a stutter rather than as a clock. The tick only moves
+/// one number, so the cost is a repaint of a small window.
+///
+/// The id is arbitrary but must be unique among this window's timers, of which
+/// there are none besides this one.
+const TIMER_WATCH: usize = 1;
+const WATCH_TICK_MS: u32 = 100;
+
+/// Arm or disarm the Stopwatch page's repaint timer.
+///
+/// A win32 timer owned by this window, and the only one it owns. The clock
+/// cannot ride the tray's own tick: that is a second at its shortest, and a
+/// user who set `interval_ms` to a minute would be watching a stopwatch that
+/// advanced once a minute — which is not a slower stopwatch, it is a broken one.
+///
+/// It is armed on start and killed on stop rather than left running, so a
+/// paused clock costs nothing, and `SetTimer` with an id that is already armed
+/// only resets the interval — calling this twice is not two timers.
+fn set_watch_timer(hwnd: HWND, running: bool) {
+    // SAFETY: our own window, and an id that belongs to no other timer here.
+    unsafe {
+        if running {
+            SetTimer(Some(hwnd), TIMER_WATCH, WATCH_TICK_MS, None);
+        } else {
+            let _ = KillTimer(Some(hwnd), TIMER_WATCH);
+        }
+    }
+}
 
 /// The low half of a `WPARAM`, which is where `WM_COMMAND` packs the child id.
 /// `LOWORD` is not in the bindings and the mask is the whole of it.

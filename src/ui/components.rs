@@ -164,6 +164,9 @@ pub(crate) struct Fonts {
     pub title: HFONT,
     /// A section caption, between the body and the heading.
     pub caption: HFONT,
+    /// The Stopwatch page's reading. Body-sized on every other page by
+    /// construction — nothing but the clock reaches for it.
+    pub clock: HFONT,
 }
 
 /// A vertical cursor down one page.
@@ -500,6 +503,7 @@ mod tests {
             bold: HFONT::default(),
             title: HFONT::default(),
             caption: HFONT::default(),
+            clock: HFONT::default(),
         };
         let pal = crate::ui::design::palette(&crate::config::Config::default());
         // A null DC: the text calls no-op against it and the arithmetic under

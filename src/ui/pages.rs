@@ -9,13 +9,14 @@ use crate::taskbar::TrayModel;
 /// `Settings` is **appended**. These indices are positional, so inserting it
 /// anywhere but the end would renumber every page after it — the labels would
 /// still read correctly and the routing would be wrong.
-pub(crate) const PAGES: [&str; 7] = [
+pub(crate) const PAGES: [&str; 8] = [
     "Overview",
     "Network",
     "System",
     "Data",
     "Ports",
     "Speed Test",
+    "Stopwatch",
     "Settings",
 ];
 pub(crate) const OVERVIEW: usize = 0;
@@ -24,7 +25,8 @@ pub(crate) const SYSTEM: usize = 2;
 pub(crate) const DATA: usize = 3;
 pub(crate) const PORTS: usize = 4;
 pub(crate) const SPEEDTEST: usize = 5;
-pub(crate) const SETTINGS: usize = 6;
+pub(crate) const STOPWATCH: usize = 6;
+pub(crate) const SETTINGS: usize = 7;
 
 // --- pages ----------------------------------------------------------------
 
@@ -104,6 +106,11 @@ pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, St
             push("Latency", &model.speed_latency_text);
             push("Status", &model.speed_phase_text);
         }
+        // The Stopwatch page has no reading on it either: its one number is
+        // drawn by the painter, in the same place the button that starts it
+        // sits, because a clock and the control that runs it are one thing.
+        // Without its own arm it would fall through to the overview below.
+        STOPWATCH => {}
         // The Settings page has no metric on it: every line it shows is a
         // caption from `SET_ROW_LABELS` beside a control. Without this arm it
         // would fall through to the overview below and paint the traffic
@@ -325,8 +332,13 @@ mod tests {
     #[test]
     fn every_section_is_anchored_on_a_row_that_exists() {
         for page in 0..PAGES.len() {
-            if PAGES[page] == "Settings" {
-                // No rows at all: a caption per control, drawn by the layout.
+            if page_rows(page, &full()).is_empty() {
+                // No rows at all, so nothing to group: Settings is a caption
+                // per control drawn by the layout, and the Stopwatch is a clock
+                // drawn by the painter. Asked as the question the assertions
+                // below actually need rather than as a list of page names,
+                // because a page with no rows fails them for the right reason
+                // and adding one should not silently skip them.
                 continue;
             }
             let mut heads = headings(page);

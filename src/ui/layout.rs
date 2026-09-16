@@ -16,6 +16,14 @@ pub(crate) const SPARK_GAP: i32 = 14;
 pub(crate) const SIDEBAR_W: i32 = 150;
 pub(crate) const TITLE_EXTRA: i32 = 6;
 
+/// Points above the configured size for the Stopwatch page's clock.
+///
+/// Far enough above the body that the reading is legible from across a desk,
+/// because on that page it is the *only* thing there is to read. A band would
+/// not do it: the rows are 30 pixels tall and a face that filled one would still
+/// be body-sized.
+pub(crate) const CLOCK_EXTRA: i32 = 36;
+
 /// Air above the page title.
 ///
 /// The first band on a page is laid out from its top, so a title larger than a
@@ -54,16 +62,17 @@ pub(crate) fn layout(hwnd: HWND, state: &mut UiState) {
 /// by the DPI change and the settings save, because both are "the font's inputs
 /// moved" and getting one of the two paths wrong leaves stale text.
 pub(crate) fn rebuild_fonts(state: &mut UiState) {
-    // SAFETY: all three fonts are ours and are not selected into any DC between
+    // SAFETY: all four fonts are ours and are not selected into any DC between
     // paints.
     unsafe {
-        for font in [&mut state.font, &mut state.bold, &mut state.title] {
+        for font in [&mut state.font, &mut state.bold, &mut state.title, &mut state.clock] {
             let _ = DeleteObject(HGDIOBJ(font.0));
         }
     }
     state.font = create_font(&state.cfg, state.dpi, 0, false);
     state.bold = create_font(&state.cfg, state.dpi, 1, true);
     state.title = create_font(&state.cfg, state.dpi, TITLE_EXTRA, true);
+    state.clock = create_font(&state.cfg, state.dpi, CLOCK_EXTRA, true);
 
     // The controls' face is the theme too: a background edit has to move it or
     // the checkboxes keep the old plate until the next launch.

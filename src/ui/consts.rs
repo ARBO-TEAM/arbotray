@@ -52,6 +52,16 @@ pub(crate) const SET_SPEED: i32 = SET_ID_BASE + 18;
 /// `WM_COMMAND` stream, one font sweep, one visibility function.
 pub(crate) const SET_STOP: i32 = SET_ID_BASE + 19;
 
+/// The Stopwatch page's two controls: one button that starts a run and stops
+/// it again, and one that puts the clock back to zero.
+///
+/// One toggle rather than a Start and a Stop side by side, because they are
+/// never both meaningful: a clock is either running or it is not, and two
+/// buttons would leave one of them doing nothing on every frame. Reset is
+/// separate because it means something in either state.
+pub(crate) const SET_WATCH: i32 = SET_ID_BASE + 20;
+pub(crate) const SET_WATCH_RESET: i32 = SET_ID_BASE + 21;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings

@@ -163,6 +163,10 @@ pub(crate) const ICON_SETTINGS: u16 = 0xE713;
 pub(crate) const ICON_PORTS: u16 = 0xE968;
 /// A bolt, for the speed test.
 pub(crate) const ICON_SPEED: u16 = 0xE945;
+/// A stopwatch — body, stem and all — for the clock page. The face has a plain
+/// alarm clock at `0xE917` as well; the stem is what tells the two apart at
+/// 16 pixels, and this is the one that is not already a clock reading.
+pub(crate) const ICON_STOPWATCH: u16 = 0xE916;
 
 /// The glyph a sidebar entry leads with, by page index.
 pub(crate) fn page_icon(page: usize) -> u16 {
@@ -173,6 +177,7 @@ pub(crate) fn page_icon(page: usize) -> u16 {
         crate::ui::pages::DATA => ICON_DATA,
         crate::ui::pages::PORTS => ICON_PORTS,
         crate::ui::pages::SPEEDTEST => ICON_SPEED,
+        crate::ui::pages::STOPWATCH => ICON_STOPWATCH,
         crate::ui::pages::SETTINGS => ICON_SETTINGS,
         // Not reachable: the page is clamped to `PAGES` before it gets here.
         // The overview's glyph is a better answer than a blank column anyway.
