@@ -218,6 +218,10 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         latency_text: field(cfg.show.latency, "9999ms"),
         cpu_text: field(cfg.show.cpu, "100%"),
         ram_text: field(cfg.show.ram, "100%"),
+        wifi_text: field(cfg.show.wifi, "6G 100%"),
+        wifi_name: None,
+        usage_text: field(cfg.show.usage, "9999.9G"),
+        quota_alert: false,
         history: if cfg.show.sparkline {
             vec![0; RESERVED_HISTORY]
         } else {
@@ -245,6 +249,7 @@ mod tests {
                 cpu: false,
                 ram: true,
                 wifi: false,
+                usage: false,
                 sparkline: false,
             },
             ..Default::default()

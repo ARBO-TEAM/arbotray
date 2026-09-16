@@ -22,6 +22,18 @@ pub struct TrayModel {
     pub latency_text: String,
     pub cpu_text: String,
     pub ram_text: String,
+    /// Band and signal, e.g. `5G 78%`. The SSID is too long for the taskbar
+    /// and lives in the icon's hover tooltip instead.
+    pub wifi_text: String,
+    /// SSID of the connected network, for the tooltip only.
+    pub wifi_name: Option<String>,
+    /// Today's total traffic, e.g. `1.4G`. Filled by the sampler loop rather
+    /// than `from_metric`: the usage counter is stateful, and `from_metric`
+    /// stays pure so it remains testable.
+    pub usage_text: String,
+    /// Today's total is over the configured plan. Drives a colour swap, since
+    /// text in the taskbar has no room for an icon.
+    pub quota_alert: bool,
     /// Recent download throughput, oldest first — the mini-sparkline source.
     pub history: Vec<u64>,
 }

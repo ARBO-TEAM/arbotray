@@ -7,11 +7,13 @@
 pub mod hardware;
 pub mod latency;
 pub mod network;
+pub mod usage;
 pub mod wifi;
 
 pub use hardware::Hardware;
 pub use latency::Latency;
 pub use network::Network;
+pub use usage::Usage;
 pub use wifi::Wifi;
 
 /// Throughput in **bytes per second**, already delta'd between polls.

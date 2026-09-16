@@ -54,6 +54,8 @@ pub fn visible_segments(model: &TrayModel) -> Vec<&str> {
         model.latency_text.as_str(),
         model.cpu_text.as_str(),
         model.ram_text.as_str(),
+        model.wifi_text.as_str(),
+        model.usage_text.as_str(),
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -228,7 +230,11 @@ impl Renderer {
 
             let old_font = SelectObject(mem, HGDIOBJ(self.font.0));
             SetBkMode(mem, TRANSPARENT);
-            let fg = parse_color(&cfg.theme.foreground).unwrap_or(COLORREF(0x00FF_FFFF));
+            let fg = if model.quota_alert {
+                parse_color(&cfg.theme.alert).unwrap_or(COLORREF(0x0000_00FF))
+            } else {
+                parse_color(&cfg.theme.foreground).unwrap_or(COLORREF(0x00FF_FFFF))
+            };
             SetTextColor(mem, fg);
 
             // Text run, left to right.
@@ -382,9 +388,16 @@ mod tests {
             latency_text: "8ms".into(),
             cpu_text: String::new(),
             ram_text: "44%".into(),
+            wifi_text: "5G 78%".into(),
+            wifi_name: None,
+            usage_text: "1.4G".into(),
+            quota_alert: false,
             history: Vec::new(),
         };
-        assert_eq!(visible_segments(&model), vec!["1.0M/s", "8ms", "44%"]);
+        assert_eq!(
+            visible_segments(&model),
+            vec!["1.0M/s", "8ms", "44%", "5G 78%", "1.4G"]
+        );
     }
 
     #[test]

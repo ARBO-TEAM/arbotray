@@ -62,10 +62,27 @@ pub fn run() -> i32 {
 fn telemetry_loop(notifier: crate::taskbar::Notifier, cfg: Config, interval: Duration) {
     let mut sampler = Sampler::new();
     let mut history: Vec<u64> = Vec::with_capacity(HISTORY_LEN);
+    // Loaded once and carried across ticks: it accumulates deltas, so a fresh
+    // one per poll would have no baseline and count nothing.
+    let mut usage = crate::telemetry::Usage::load();
 
     loop {
         let metric = sampler.poll();
+
+        // Feed the quota counter from the raw cumulative octets, not from
+        // `metric.net` — that is already divided into a rate.
+        if let Some((rx, tx)) = sampler.net.totals() {
+            usage.record(rx, tx);
+        }
+        usage.flush_if_due();
+
         let mut model = TrayModel::from_metric(&metric, &cfg);
+        if cfg.show.usage {
+            model.usage_text = usage.text();
+            model.quota_alert = usage
+                .quota_pct(cfg.quota_gb)
+                .is_some_and(|pct| pct >= 100.0);
+        }
 
         if let Some(net) = metric.net {
             if history.len() == HISTORY_LEN {

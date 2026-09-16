@@ -87,6 +87,14 @@ impl Network {
         self.prev = Some((rx, tx, now));
         Some(sample)
     }
+
+    /// The most recent cumulative `(rx, tx)` octets, before any rate division.
+    ///
+    /// Quota accounting diffs these directly — a byte total built by summing
+    /// rounded per-second rates drifts, one truncation at a time.
+    pub fn totals(&self) -> Option<(u64, u64)> {
+        self.prev.map(|(rx, tx, _)| (rx, tx))
+    }
 }
 
 #[cfg(test)]

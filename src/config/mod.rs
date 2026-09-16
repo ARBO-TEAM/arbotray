@@ -14,6 +14,9 @@ pub struct Config {
     pub interval_ms: u32,
     pub theme: Theme,
     pub retention: Retention,
+    /// Monthly data allowance in GB. `0` means "no plan", which hides the
+    /// percentage and the warning colour entirely.
+    pub quota_gb: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +28,9 @@ pub struct Show {
     pub cpu: bool,
     pub ram: bool,
     pub wifi: bool,
+    /// Today's total traffic. Off by default: most people have no quota to
+    /// watch, and it is the widest tile of the lot.
+    pub usage: bool,
     pub sparkline: bool,
 }
 
@@ -35,6 +41,9 @@ pub struct Theme {
     pub foreground: String,
     /// `#RRGGBB`
     pub background: String,
+    /// `#RRGGBB` used for the whole run once the data plan is exceeded. The
+    /// taskbar has no room for a warning icon, so colour is the whole signal.
+    pub alert: String,
     pub font_size: u32,
     /// 0 = fully transparent, 255 = opaque.
     pub opacity: u8,
@@ -57,6 +66,7 @@ impl Default for Config {
             interval_ms: 1000,
             theme: Theme::default(),
             retention: Retention::default(),
+            quota_gb: 0.0,
         }
     }
 }
@@ -70,6 +80,7 @@ impl Default for Show {
             cpu: true,
             ram: true,
             wifi: false,
+            usage: false,
             sparkline: true,
         }
     }
@@ -80,6 +91,7 @@ impl Default for Theme {
         Self {
             foreground: "#E6E6E6".into(),
             background: "#000000".into(),
+            alert: "#FF6B6B".into(),
             font_size: 12,
             opacity: 0,
         }
