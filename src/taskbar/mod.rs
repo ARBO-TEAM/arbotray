@@ -102,8 +102,70 @@ pub struct TrayModel {
     /// sample because the formatted pair is what the page draws, and formatting
     /// is what the model is for.
     pub disks: Vec<(String, String)>,
+
+    // --- the Ports page's detail -------------------------------------------
+    //
+    // Page detail like the rest: no port figure has a tile, and none of these
+    // appears in `visible_segments`, so a machine with two hundred open sockets
+    // has exactly the taskbar its owner asked for.
+
+    /// TCP sockets in LISTEN — the machine's open doors.
+    pub listeners_text: String,
+    /// TCP sockets with a peer.
+    pub established_text: String,
+    /// Bound UDP sockets.
+    pub udp_text: String,
+    /// Distinct processes holding any of the above.
+    pub port_owners_text: String,
+    /// The listening ports worth naming.
+    ///
+    /// A list rather than a joined string for the same reason `disks` is: the
+    /// port belongs in a row's label and its owner in the value, and a machine
+    /// with a dozen listeners joined into one row would be a paragraph
+    /// ellipsised at the first port.
+    pub open_ports: Vec<OpenPort>,
+
+    // --- the Speed Test page's detail --------------------------------------
+
+    /// What the test is doing: a phase label, or empty when idle.
+    pub speed_phase_text: String,
+    /// 0..=100 through the current run, for the progress readout.
+    pub speed_percent: u32,
+    /// Whether a run is in flight. Carried as a flag rather than read back off
+    /// the phase label, because the label is for the reader and this is for the
+    /// button: a string comparison would make the button's enablement depend on
+    /// how a phase was spelled.
+    pub speed_running: bool,
+    /// The run in flight, or the last one to finish.
+    pub speed_down_text: String,
+    pub speed_up_text: String,
+    pub speed_latency_text: String,
+    /// Why the last run stopped early.
+    pub speed_error_text: String,
+    /// When the last run finished, e.g. `14:32:07`, so a stale result is not
+    /// mistaken for a live one.
+    pub speed_when_text: String,
+    /// Completed runs, newest first, as `(time, "down / up")`.
+    pub speed_history: Vec<(String, String)>,
+
     /// Recent download throughput, oldest first — the mini-sparkline source.
     pub history: Vec<u64>,
+}
+
+/// One row of the Ports page: a port, who holds it, and the pid to stop it by.
+///
+/// A named struct rather than a third tuple element because the pid is not part
+/// of what the row *says* — it is what a destructive action on the row is aimed
+/// at. Reading the two apart is the difference between drawing a row and ending
+/// a process, and a `.2` at the call site would hide that.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenPort {
+    /// The row's label, e.g. `:445`.
+    pub port: String,
+    /// The row's value: the program, and its pid after it.
+    pub owner: String,
+    /// The process holding the socket — what `ports::stop_process` takes.
+    pub pid: u32,
 }
 
 impl TrayModel {
@@ -207,6 +269,33 @@ impl TrayModel {
             })
             .collect();
 
+        // The port tables. Always present in the sample, so the counts always
+        // draw — a machine with nothing open reads `0`, which is an answer.
+        let ports = &m.ports;
+        out.listeners_text = ports.listeners.to_string();
+        out.established_text = ports.established.to_string();
+        out.udp_text = ports.udp.to_string();
+        out.port_owners_text = ports.owners.to_string();
+        out.open_ports = ports
+            .open
+            .iter()
+            .map(|p| {
+                // The program's name where it could be read, its pid where it
+                // could not: the pid is always right, and a row reading
+                // `:445  System  pid 4` is more use than one reading
+                // `:445  —`.
+                let owner = match &p.process {
+                    Some(name) => format!("{name}  pid {}", p.pid),
+                    None => format!("pid {}", p.pid),
+                };
+                OpenPort {
+                    port: format!(":{}", p.port),
+                    owner,
+                    pid: p.pid,
+                }
+            })
+            .collect();
+
         if let Some(hw) = &m.hw {
             if cfg.show.cpu {
                 out.cpu_text = format!("{:.0}%", hw.cpu_pct);
@@ -221,6 +310,59 @@ impl TrayModel {
             }
         }
         out
+    }
+
+    /// Fold a speed-test run into the page's fields.
+    ///
+    /// A method rather than a branch of `from_metric`, because unlike every
+    /// other field this one is *stateful*: a run outlives the sample it was
+    /// started in, and its history would be lost if it were rebuilt from a
+    /// metric each tick. `from_metric` stays pure and this stays the one place
+    /// a running test is rendered, which is the same split `usage_text` makes.
+    pub fn set_speed(&mut self, status: &crate::telemetry::speedtest::SpeedStatus) {
+        self.speed_phase_text = status.phase.label().to_string();
+        self.speed_percent = status.percent;
+        self.speed_running = status.running();
+        // Dashed rather than blank for a measurement that has not happened: the
+        // page has a row either way, and an empty value reads as a rendering
+        // fault next to a label.
+        self.speed_down_text = match status.down_bps {
+            Some(bps) => format_rate(bps),
+            None => "--".into(),
+        };
+        self.speed_up_text = match status.up_bps {
+            Some(bps) => format_rate(bps),
+            None => "--".into(),
+        };
+        self.speed_latency_text = match status.latency_ms {
+            Some(ms) => format!("{ms}ms"),
+            None => "--".into(),
+        };
+        self.speed_error_text = status.error.clone().unwrap_or_default();
+        self.speed_when_text = status.finished_at.clone().unwrap_or_default();
+        self.speed_history = status
+            .history
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                // The run's own stamp where the run recorded one. Only the
+                // newest has a time stored, so older rows are numbered — a
+                // number is honest, where repeating the newest run's time
+                // against four other rows would not be.
+                let when = match (i, &status.finished_at) {
+                    (0, Some(t)) => t.clone(),
+                    _ => format!("#{}", i + 1),
+                };
+                (
+                    when,
+                    format!(
+                        "{} / {}",
+                        format_rate(r.down_bps),
+                        format_rate(r.up_bps)
+                    ),
+                )
+            })
+            .collect();
     }
 
     /// Hover text for the tray icon.
@@ -443,6 +585,9 @@ mod tests {
             wifi: None,
             adapter: None,
             system: Default::default(),
+            // Nothing listening is the case this test is not about; the
+            // struct-update keeps it from having to say so field by field.
+            ..Default::default()
         };
         let model = TrayModel::from_metric(&m, &cfg);
         assert_eq!(model.down_text, "");

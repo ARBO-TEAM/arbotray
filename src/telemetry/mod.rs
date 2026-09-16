@@ -8,6 +8,8 @@ pub mod adapter;
 pub mod hardware;
 pub mod latency;
 pub mod network;
+pub mod ports;
+pub mod speedtest;
 pub mod system;
 pub mod usage;
 pub mod wifi;
@@ -16,6 +18,8 @@ pub use adapter::Adapter;
 pub use hardware::Hardware;
 pub use latency::Latency;
 pub use network::Network;
+pub use ports::Ports;
+pub use speedtest::SpeedTest;
 pub use system::SystemInfo;
 pub use usage::Usage;
 pub use wifi::Wifi;
@@ -145,6 +149,22 @@ pub struct DiskInfo {
     pub total_bytes: u64,
 }
 
+/// One open network endpoint, and what is holding it open.
+///
+/// The process name is the informative half: a port number alone is a riddle,
+/// and the name beside it is the answer. It is optional because it routinely
+/// cannot be read — most sockets on a healthy machine belong to protected
+/// processes that refuse to be opened — so a row with no name is normal, not
+/// a failure to report.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortInfo {
+    pub port: u16,
+    /// `None` for a state the page does not distinguish.
+    pub state: Option<ports::TcpState>,
+    pub pid: u32,
+    pub process: Option<String>,
+}
+
 /// One full snapshot of everything the tray can display.
 #[derive(Debug, Clone, Default)]
 pub struct Metric {
@@ -157,6 +177,10 @@ pub struct Metric {
     /// machine, and the fields that can genuinely be missing are `Option`s
     /// inside it.
     pub system: SystemSample,
+    /// Also not optional, for the same reason as `system`: the port tables
+    /// answer on any running machine, and a machine with nothing bound is a
+    /// reading — zero — rather than a failure.
+    pub ports: ports::PortsSample,
 }
 
 /// Owns every collector and polls them together, in the order the tray needs.
@@ -168,6 +192,7 @@ pub struct Sampler {
     pub latency: Latency,
     pub adapter: Adapter,
     pub system: SystemInfo,
+    pub ports: Ports,
 }
 
 impl Sampler {
@@ -179,6 +204,7 @@ impl Sampler {
             latency: Latency::new(),
             adapter: Adapter::new(),
             system: SystemInfo::new(),
+            ports: Ports::new(),
         }
     }
 
@@ -190,6 +216,7 @@ impl Sampler {
             latency: self.latency.poll(),
             adapter: self.adapter.poll(),
             system: self.system.poll(),
+            ports: self.ports.poll(),
         }
     }
 }
