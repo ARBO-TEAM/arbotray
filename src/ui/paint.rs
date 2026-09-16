@@ -10,7 +10,9 @@
 use crate::taskbar::render::sparkline_points;
 use crate::ui::components::{Canvas, Fonts};
 use crate::ui::design::palette;
-use crate::ui::pages::{DATA, PAGES, SETTINGS, page_rows, page_shows_graph, usage_rows};
+use crate::ui::pages::{
+    DATA, PAGES, SETTINGS, SYSTEM, page_rows, page_shows_graph, system_section, usage_rows,
+};
 use crate::ui::settings::SET_ROW_LABELS;
 use crate::ui::theme::scale;
 use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, VALUE_OFFSET, UiState};
@@ -92,6 +94,17 @@ pub(crate) fn paint(hwnd: HWND, state: &UiState) {
         }
 
         for (label, value) in &page_rows(page, &state.model) {
+            // The System page is ten pairs tall, and ten pairs with nothing
+            // between them is a wall. Its groups get the same caption-and-rule
+            // the Data page's day list already uses, so the page reads in four
+            // short blocks instead of one long one. Anchored on the row, so a
+            // group whose first row is switched off has no header rather than a
+            // header standing over someone else's rows.
+            if page == SYSTEM {
+                if let Some(name) = system_section(label) {
+                    c.section(name);
+                }
+            }
             c.row(label, value);
         }
 

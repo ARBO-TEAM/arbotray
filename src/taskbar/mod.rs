@@ -69,6 +69,30 @@ pub struct TrayModel {
     /// draws these; the strip never does. Amended by reference to `Usage`
     /// rather than as a rendered string because each row is its own label.
     pub usage_days: Vec<(String, u64)>,
+
+    // --- the System page's detail ------------------------------------------
+    //
+    // Like the network detail above, none of these is gated on `cfg.show` and
+    // none of them reaches `visible_segments`. The taskbar has no room for a
+    // machine name, and a strip padded with the Windows build number is a strip
+    // nobody would keep switched on.
+
+    /// The machine's name on the network.
+    pub computer_text: String,
+    /// Edition, release and build.
+    pub windows_text: String,
+    /// The processor's marketing name.
+    pub cpu_name_text: String,
+    /// `6 cores / 12 threads`, or whichever half this machine will admit to.
+    pub cores_text: String,
+    /// Display adapters, joined. Already de-duplicated by the collector.
+    pub gpu_text: String,
+    /// Charge left. Blank on a machine with no battery.
+    pub battery_text: String,
+    /// `Plugged in` or `On battery`.
+    pub power_text: String,
+    /// `3d 4h`, at two units of precision.
+    pub uptime_text: String,
     /// Recent download throughput, oldest first — the mini-sparkline source.
     pub history: Vec<u64>,
 }
@@ -140,6 +164,26 @@ impl TrayModel {
                 out.wifi_name = w.ssid.clone();
             }
         }
+        // The machine's identity. Always page detail, never a tile: there is no
+        // checkbox for any of it, and `visible_segments` names its fields
+        // explicitly, so none of these can leak onto the strip.
+        let sys = &m.system;
+        out.computer_text = sys.computer_name.clone().unwrap_or_default();
+        out.windows_text = sys.windows.clone().unwrap_or_default();
+        out.cpu_name_text = sys.cpu_name.clone().unwrap_or_default();
+        out.cores_text = format_cores(sys.physical_cores, sys.logical_cores);
+        out.gpu_text = sys.gpus.join(", ");
+        out.battery_text = sys.battery_pct.map(|p| format!("{p}%")).unwrap_or_default();
+        // Plugged and unplugged are worth saying even where a battery is not
+        // there to report a level: a desktop is permanently on mains, and that
+        // is the answer to the same question.
+        out.power_text = match sys.on_ac {
+            Some(true) => "Plugged in".into(),
+            Some(false) => "On battery".into(),
+            None => String::new(),
+        };
+        out.uptime_text = sys.uptime_secs.map(format_uptime).unwrap_or_default();
+
         if let Some(hw) = &m.hw {
             if cfg.show.cpu {
                 out.cpu_text = format!("{:.0}%", hw.cpu_pct);
@@ -199,6 +243,53 @@ pub fn format_rate(bps: u64) -> String {
         format!("{:.1}M/s", b / (KIB * KIB))
     } else {
         format!("{:.2}G/s", b / (KIB * KIB * KIB))
+    }
+}
+
+/// `6 cores / 12 threads`, from whichever of the two counts the machine gave.
+///
+/// Both halves are printed rather than one number because the pair is the
+/// reading: 6 and 12 says SMT is on, 6 and 6 says it is not, and either number
+/// alone cannot tell you which machine you are on. A machine that answers
+/// neither half produces an empty row rather than a zero.
+///
+/// Singular forms are spelled out: "1 cores" is the kind of detail that makes a
+/// whole page look unfinished.
+pub fn format_cores(physical: Option<u32>, logical: Option<u32>) -> String {
+    let cores = physical.map(|c| match c {
+        1 => "1 core".to_string(),
+        n => format!("{n} cores"),
+    });
+    let threads = logical.map(|t| match t {
+        1 => "1 thread".to_string(),
+        n => format!("{n} threads"),
+    });
+    match (cores, threads) {
+        (Some(c), Some(t)) => format!("{c} / {t}"),
+        (Some(c), None) => c,
+        (None, Some(t)) => t,
+        (None, None) => String::new(),
+    }
+}
+
+/// `3d 4h`, `4h 12m`, `12m` — two units, the largest that apply.
+///
+/// Two and not three: the seconds are noise on a row that answers "did this
+/// machine just boot?", and a lifetime printed to the second is a lifetime
+/// nobody reads. Under a minute says `just now`, because `0m` looks like a
+/// reading that failed rather than one that is simply small.
+pub fn format_uptime(secs: u64) -> String {
+    let minutes = secs / 60;
+    let hours = minutes / 60;
+    let days = hours / 24;
+    if days > 0 {
+        format!("{days}d {}h", hours % 24)
+    } else if hours > 0 {
+        format!("{hours}h {}m", minutes % 60)
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        "just now".to_string()
     }
 }
 
@@ -328,6 +419,7 @@ mod tests {
             }),
             wifi: None,
             adapter: None,
+            system: Default::default(),
         };
         let model = TrayModel::from_metric(&m, &cfg);
         assert_eq!(model.down_text, "");

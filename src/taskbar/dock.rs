@@ -300,6 +300,18 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         month_text: String::new(),
         month_partial: false,
         usage_days: Vec::new(),
+        // The System page's detail, all of it empty for the same reason as the
+        // network detail above: none of these has a tile, so reserving width for
+        // a machine name and a Windows build string would widen the taskbar
+        // permanently for text that is never drawn there.
+        computer_text: String::new(),
+        windows_text: String::new(),
+        cpu_name_text: String::new(),
+        cores_text: String::new(),
+        gpu_text: String::new(),
+        battery_text: String::new(),
+        power_text: String::new(),
+        uptime_text: String::new(),
         history: if cfg.show.sparkline {
             vec![0; RESERVED_HISTORY]
         } else {

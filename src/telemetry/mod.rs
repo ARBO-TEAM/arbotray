@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod hardware;
 pub mod latency;
 pub mod network;
+pub mod system;
 pub mod usage;
 pub mod wifi;
 
@@ -15,6 +16,7 @@ pub use adapter::Adapter;
 pub use hardware::Hardware;
 pub use latency::Latency;
 pub use network::Network;
+pub use system::SystemInfo;
 pub use usage::Usage;
 pub use wifi::Wifi;
 
@@ -95,6 +97,36 @@ pub struct AdapterSample {
     pub dns: Vec<u32>,
 }
 
+/// The machine itself: what it is, and what its power is doing.
+///
+/// Every field is optional because every one of them can genuinely be missing —
+/// a desktop has no battery, a locked-down machine has no registry to read a CPU
+/// name out of. `None` is "this machine cannot answer", and the System page
+/// drops the row rather than printing a placeholder for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SystemSample {
+    /// The machine's name on the network.
+    pub computer_name: Option<String>,
+    /// Edition, release and build, e.g. `Windows 11 Pro 24H2 (build 26100.3915)`.
+    pub windows: Option<String>,
+    /// The processor's marketing name, not its architecture.
+    pub cpu_name: Option<String>,
+    /// Physical cores, from the platform's relation table.
+    pub physical_cores: Option<u32>,
+    /// Logical processors Windows will schedule on — threads, not cores. Kept
+    /// beside the physical count because the pair is the informative reading:
+    /// 6 and 12 says SMT is on, 6 and 6 says it is not.
+    pub logical_cores: Option<u32>,
+    /// Display adapters, in enumeration order, de-duplicated.
+    pub gpus: Vec<String>,
+    /// Charge left, 0..=100. `None` on a machine with no battery.
+    pub battery_pct: Option<u32>,
+    /// On mains power. `None` when Windows will not say, which is neither.
+    pub on_ac: Option<bool>,
+    /// Seconds since boot.
+    pub uptime_secs: Option<u64>,
+}
+
 /// One full snapshot of everything the tray can display.
 #[derive(Debug, Clone, Default)]
 pub struct Metric {
@@ -103,6 +135,10 @@ pub struct Metric {
     pub wifi: Option<WifiSample>,
     pub latency: Option<LatencySample>,
     pub adapter: Option<AdapterSample>,
+    /// Not optional, unlike its neighbours: its collector answers on any running
+    /// machine, and the fields that can genuinely be missing are `Option`s
+    /// inside it.
+    pub system: SystemSample,
 }
 
 /// Owns every collector and polls them together, in the order the tray needs.
@@ -113,6 +149,7 @@ pub struct Sampler {
     pub wifi: Wifi,
     pub latency: Latency,
     pub adapter: Adapter,
+    pub system: SystemInfo,
 }
 
 impl Sampler {
@@ -123,6 +160,7 @@ impl Sampler {
             wifi: Wifi::new(),
             latency: Latency::new(),
             adapter: Adapter::new(),
+            system: SystemInfo::new(),
         }
     }
 
@@ -133,6 +171,7 @@ impl Sampler {
             wifi: self.wifi.poll(),
             latency: self.latency.poll(),
             adapter: self.adapter.poll(),
+            system: self.system.poll(),
         }
     }
 }

@@ -610,6 +610,18 @@ mod tests {
             month_partial: false,
             usage_days: vec![("09-14".into(), 1000), ("09-15".into(), 2000)],
             history: vec![1, 2, 3],
+            // The System page's detail, filled so the page's own tests see a
+            // machine that answered everything rather than one that answered
+            // nothing — a blank field here would make a row-ordering assertion
+            // pass for the wrong reason.
+            computer_text: "STUDIO-PC".into(),
+            windows_text: "Windows 11 Pro 24H2 (build 26100.2033)".into(),
+            cpu_name_text: "AMD Ryzen 5 7600 6-Core Processor".into(),
+            cores_text: "6 cores / 12 threads".into(),
+            gpu_text: "AMD Radeon RX 6600".into(),
+            battery_text: "88%".into(),
+            power_text: "Plugged in".into(),
+            uptime_text: "3d 4h".into(),
         }
     }
 
@@ -909,8 +921,15 @@ mod tests {
     }
 
     #[test]
-    fn the_system_page_is_only_hardware() {
-        assert_eq!(labels(SYSTEM, &full()), vec!["CPU", "RAM"]);
+    fn the_system_page_leads_with_the_live_metrics() {
+        // The page grew from two rows to ten. The live pair stays at the top
+        // because it is what moves — everything below it is a reading of
+        // something that does not, and burying the moving numbers under the
+        // machine's name would make the page's most useful line its hardest to
+        // find.
+        let rows = labels(SYSTEM, &full());
+        assert_eq!(&rows[..2], ["CPU", "RAM"]);
+        assert_eq!(rows.len(), 10, "the detail rows are missing: {rows:?}");
     }
 
     #[test]
