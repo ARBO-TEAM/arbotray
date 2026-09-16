@@ -65,14 +65,16 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier) {
     let mut sampler = Sampler::new();
     let mut history: Vec<u64> = Vec::with_capacity(HISTORY_LEN);
     // Loaded once and carried across ticks: it accumulates deltas, so a fresh
-    // one per poll would have no baseline and count nothing.
-    let mut usage = crate::telemetry::Usage::load();
+    // one per poll would have no baseline and count nothing. The retention
+    // window comes from the config as it was at startup, like every other
+    // setting that only shapes what is on disk.
+    let mut usage = crate::telemetry::Usage::load(notifier.config().retention.days);
 
     loop {
         let cfg = notifier.config();
         let metric = sampler.poll();
 
-        // Feed the quota counter from the raw cumulative octets, not from
+        // Feed the usage counter from the raw cumulative octets, not from
         // `metric.net` — that is already divided into a rate.
         if let Some((rx, tx)) = sampler.net.totals() {
             usage.record(rx, tx);
@@ -86,6 +88,12 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier) {
                 .quota_pct(cfg.quota_gb)
                 .is_some_and(|pct| pct >= 100.0);
         }
+        // Not gated on `show.usage`: like the gateway and adapter rows these
+        // are Data-page detail with no tile of their own, absent from
+        // `render::visible_segments`, so they cannot widen the strip.
+        model.month_text = crate::telemetry::usage::format_size(usage.month_bytes());
+        model.month_partial = !usage.covers_whole_month();
+        model.usage_days = usage.history();
 
         if let Some(net) = metric.net {
             if history.len() == HISTORY_LEN {

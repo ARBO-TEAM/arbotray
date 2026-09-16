@@ -5,8 +5,8 @@
 //! half a byte per tick, every tick, forever.
 //!
 //! Persisted as one small JSON file rather than a database. A day's total is
-//! two integers, and the retention window is one day — anything with a schema
-//! and a migration story would be more machinery than the data deserves.
+//! two integers and the file keeps a week of them — anything with a schema and
+//! a migration story would be more machinery than the data deserves.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -23,16 +23,46 @@ const SAVE_EVERY: Duration = Duration::from_secs(30);
 /// Bytes in a "G", matching what `format_rate` means by the same letter.
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-/// The on-disk shape.
+/// The number of daily records kept when the config says nothing sane.
+const MIN_KEEP_DAYS: usize = 1;
+/// Ten years. Past any use, and it bounds what a hand-edited `raw_days` can
+/// grow this file to.
+const MAX_KEEP_DAYS: usize = 3650;
+
+/// One day's byte counters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct Stored {
-    /// Local date the totals belong to, `YYYY-MM-DD`.
+struct Day {
+    /// Local date, `YYYY-MM-DD`. Zero-padded, so lexicographic order is
+    /// chronological and a month is a string prefix.
     day: String,
     rx: u64,
     tx: u64,
 }
 
-/// Today's byte counters for the machine as a whole.
+impl Day {
+    fn total(&self) -> u64 {
+        self.rx.saturating_add(self.tx)
+    }
+}
+
+/// The on-disk shape: a rolling window of days, oldest first.
+///
+/// A *list* rather than one record, because a single record answers "is it me
+/// or my provider?" and never "is this month unusual?" — the second question
+/// needs yesterday to still be there when today is read.
+///
+/// A file from before this shape existed has no `days` key and loads as an
+/// empty window, so the day in flight starts again at zero. One day's total,
+/// once, on upgrade — a migration for a two-integer counter would be more
+/// machinery than the lost data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Stored {
+    #[serde(default)]
+    days: Vec<Day>,
+}
+
+/// What the machine has moved, by day. The counters themselves are cumulative
+/// since boot; nothing here counts a *rate*.
 pub struct Usage {
     path: PathBuf,
     stored: Stored,
@@ -40,13 +70,17 @@ pub struct Usage {
     /// which is what stops the first tick from counting all traffic since boot.
     last: Option<(u64, u64)>,
     saved_at: Option<Instant>,
+    /// How many days the file keeps, from `Retention.raw_days`. Bounded on the
+    /// way in: `0` would erase today's total as it is written.
+    keep_days: usize,
 }
 
 impl Usage {
-    /// `%APPDATA%\ArboTray\usage.json`. Missing or corrupt history starts the
-    /// day at zero rather than failing — this is a display counter, not a
-    /// ledger, and refusing to start over it would be absurd.
-    pub fn load() -> Self {
+    /// `%APPDATA%\ArboTray\usage.json`, keeping `keep_days` days. Missing or
+    /// corrupt history starts the day at zero rather than failing — this is a
+    /// display counter, not a ledger, and refusing to start over it would be
+    /// absurd.
+    pub fn load(keep_days: u32) -> Self {
         let path = Self::path();
         let stored = std::fs::read_to_string(&path)
             .ok()
@@ -57,7 +91,9 @@ impl Usage {
             stored,
             last: None,
             saved_at: None,
+            keep_days: clamp_keep_days(keep_days),
         };
+        usage.prune();
         // A file from an earlier day starts the new day at zero immediately,
         // so a process left running across midnight does not credit yesterday's
         // traffic to today.
@@ -77,18 +113,24 @@ impl Usage {
     /// traffic — the delta is genuinely unknown, so it is dropped.
     pub fn record(&mut self, rx_total: u64, tx_total: u64) {
         self.roll_over();
+        let Some(today) = self.stored.days.last_mut() else {
+            // `roll_over` guarantees a record exists, but returning here beats
+            // panicking on an index in a background thread.
+            self.last = Some((rx_total, tx_total));
+            return;
+        };
         if let Some((prev_rx, prev_tx)) = self.last {
             if rx_total >= prev_rx {
-                self.stored.rx = self.stored.rx.saturating_add(rx_total - prev_rx);
+                today.rx = today.rx.saturating_add(rx_total - prev_rx);
             }
             if tx_total >= prev_tx {
-                self.stored.tx = self.stored.tx.saturating_add(tx_total - prev_tx);
+                today.tx = today.tx.saturating_add(tx_total - prev_tx);
             }
         }
         self.last = Some((rx_total, tx_total));
     }
 
-    /// Write the total out, at most once per [`SAVE_EVERY`]. Failures are
+    /// Write the history out, at most once per [`SAVE_EVERY`]. Failures are
     /// ignored: a read-only profile costs us the history, not the app.
     pub fn flush_if_due(&mut self) {
         let due = match self.saved_at {
@@ -107,36 +149,100 @@ impl Usage {
         }
     }
 
-    /// Zero the counters when the local date has moved on.
+    /// Start a new day's record when the local date has moved on. Yesterday's
+    /// is *kept* — it is the whole point of the file — and the oldest falls off
+    /// the front once the window is full.
     fn roll_over(&mut self) {
         let today = today_key();
-        if self.stored.day != today {
-            self.stored = Stored {
-                day: today,
-                rx: 0,
-                tx: 0,
-            };
-            // `saved_at` is left alone so the new day's zero is written on the
-            // next due tick rather than immediately.
-            self.saved_at = None;
+        if self.stored.days.last().is_some_and(|d| d.day == today) {
+            return;
+        }
+        self.stored.days.push(Day {
+            day: today,
+            rx: 0,
+            tx: 0,
+        });
+        self.prune();
+        // `saved_at` is cleared so the new day's zero reaches disk on the next
+        // due tick rather than waiting out the current interval.
+        self.saved_at = None;
+    }
+
+    /// Drop the oldest records past the retention window. The day in flight is
+    /// never dropped: a window of zero would erase the total as it is written.
+    fn prune(&mut self) {
+        let excess = self.stored.days.len().saturating_sub(self.keep_days);
+        if excess > 0 {
+            self.stored.days.drain(..excess);
         }
     }
 
+    /// Today's record. Always present after `load`, since `roll_over` appends
+    /// one; `None` only for a `Usage` built by hand.
+    fn today(&self) -> Option<&Day> {
+        self.stored.days.last()
+    }
+
     pub fn rx_bytes(&self) -> u64 {
-        self.stored.rx
+        self.today().map_or(0, |d| d.rx)
     }
 
     pub fn tx_bytes(&self) -> u64 {
-        self.stored.tx
+        self.today().map_or(0, |d| d.tx)
     }
 
     pub fn total_bytes(&self) -> u64 {
-        self.stored.rx.saturating_add(self.stored.tx)
+        self.today().map_or(0, Day::total)
     }
 
     /// Today's total as one human-sized token, e.g. `1.4G`.
     pub fn text(&self) -> String {
         format_size(self.total_bytes())
+    }
+
+    /// Today's date as one token, e.g. `09-16`.
+    pub fn today_key(&self) -> String {
+        short_key(self.today().map_or("", |d| d.day.as_str()))
+    }
+
+    /// Days kept, oldest first, as `(MM-DD, total)` — what the Data page draws.
+    pub fn history(&self) -> Vec<(String, u64)> {
+        self.stored
+            .days
+            .iter()
+            .map(|d| (short_key(&d.day), d.total()))
+            .collect()
+    }
+
+    /// Traffic since the first of the current month, in bytes.
+    ///
+    /// Only over the days the file still holds, so with a retention window
+    /// shorter than a month this is a sum of the recent past and *not* a
+    /// month-to-date reading. [`Usage::covers_whole_month`] is what says which.
+    pub fn month_bytes(&self) -> u64 {
+        let Some(month) = self.today().map(|d| short_key(&d.day)) else {
+            return 0;
+        };
+        let month = &month[..2];
+        self.stored
+            .days
+            .iter()
+            .filter(|d| d.day.len() == 10 && d.day[5..7] == *month)
+            .map(Day::total)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Whether the oldest record kept is already inside the current month, in
+    /// which case [`Usage::month_bytes`] is the real month-to-date total.
+    /// Otherwise it is a partial sum and should say so.
+    pub fn covers_whole_month(&self) -> bool {
+        let (Some(first), Some(today)) = (self.stored.days.first(), self.today()) else {
+            return false;
+        };
+        // `[5..7]` is the month of a `YYYY-MM-DD` key: the year is `[..4]`, so
+        // comparing `[..2]` here would compare "20" against "09" and always be
+        // false — a caveat the page would then show on every machine.
+        first.day.len() == 10 && today.day.len() == 10 && first.day[5..7] == today.day[5..7]
     }
 
     /// Share of `quota_gb` consumed, 0..=∞. Deliberately *not* clamped at 100:
@@ -147,6 +253,22 @@ impl Usage {
             return None;
         }
         Some((self.total_bytes() as f64 / (quota_gb * GIB) * 100.0) as f32)
+    }
+}
+
+/// Bound `Retention.raw_days` to something the file can hold.
+pub fn clamp_keep_days(days: u32) -> usize {
+    (days as usize).clamp(MIN_KEEP_DAYS, MAX_KEEP_DAYS)
+}
+
+/// `YYYY-MM-DD` to the `MM-DD` the Data page shows. The year is never dropped
+/// when it is needed to tell two records apart — it simply never is, inside a
+/// window of at most ten years.
+fn short_key(day: &str) -> String {
+    if day.len() == 10 {
+        day[5..].to_string()
+    } else {
+        day.to_string()
     }
 }
 
@@ -195,13 +317,32 @@ mod tests {
         Usage {
             path: std::env::temp_dir().join("arbotray-usage-test.json"),
             stored: Stored {
-                day: day.into(),
-                rx: 0,
-                tx: 0,
+                days: vec![Day {
+                    day: day.into(),
+                    rx: 0,
+                    tx: 0,
+                }],
             },
             last: None,
             saved_at: None,
+            keep_days: clamp_keep_days(7),
         }
+    }
+
+    /// A `Usage` holding `days` in order, oldest first, each with the same
+    /// total — for the retention and month-sum rules.
+    fn with_days(days: &[&str], keep: u32) -> Usage {
+        let mut u = scratch(days.last().copied().unwrap_or("2026-09-16"));
+        u.stored.days = days
+            .iter()
+            .map(|d| Day {
+                day: (*d).into(),
+                rx: 500,
+                tx: 500,
+            })
+            .collect();
+        u.keep_days = clamp_keep_days(keep);
+        u
     }
 
     #[test]
@@ -240,22 +381,79 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_date_starts_the_new_day_at_zero() {
+    fn a_stale_date_starts_the_new_day_at_zero_and_keeps_the_old_one() {
         let mut u = scratch("2000-01-01");
-        u.stored.rx = 123_456;
-        u.stored.tx = 654_321;
+        u.stored.days[0].rx = 123_456;
+        u.stored.days[0].tx = 654_321;
         u.record(10, 10);
         assert_eq!(u.total_bytes(), 0, "yesterday's traffic is not today's");
-        assert_eq!(u.stored.day, today_key());
+        assert_eq!(u.stored.days.last().unwrap().day, today_key());
+        // The old day is still there — that is the whole reason the file holds
+        // a window of them rather than one record.
+        assert_eq!(u.stored.days.len(), 2);
+        assert_eq!(u.stored.days[0].day, "2000-01-01");
+        assert_eq!(u.stored.days[0].total(), 123_456 + 654_321);
+    }
+
+    #[test]
+    fn the_window_drops_its_oldest_day_and_never_the_day_in_flight() {
+        let mut u = with_days(&["2026-09-12", "2026-09-13", "2026-09-14"], 3);
+        // A fourth day arrives, so the oldest has to go.
+        u.record(0, 0);
+        assert_eq!(u.stored.days.len(), 3, "the window is three days");
+        assert_eq!(u.stored.days.first().unwrap().day, "2026-09-13");
+        assert_eq!(u.stored.days.last().unwrap().day, today_key());
+
+        // A window of zero would erase today's total as it is written, so the
+        // clamp holds one day rather than none.
+        let mut z = with_days(&["2026-09-15"], 0);
+        z.record(0, 0);
+        assert_eq!(z.stored.days.len(), 1);
+        assert_eq!(z.stored.days[0].day, today_key());
+    }
+
+    #[test]
+    fn the_month_total_sums_this_month_and_says_when_it_cannot() {
+        // Five days of the current month, all kept: a real month-to-date sum.
+        let kept = with_days(
+            &["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16"],
+            30,
+        );
+        assert!(kept.covers_whole_month());
+        assert_eq!(kept.month_bytes(), 5 * 1000);
+
+        // Last month's days are in the window but not in this month's total.
+        let straddling = with_days(&["2026-08-30", "2026-09-01", "2026-09-02"], 30);
+        assert_eq!(
+            straddling.month_bytes(),
+            2000,
+            "August must not be counted as September"
+        );
+        // The window starts last month, so this is a partial sum — the page has
+        // to say so rather than reporting it as month-to-date.
+        assert!(!straddling.covers_whole_month());
     }
 
     #[test]
     fn quota_reports_overage_instead_of_clamping() {
         let mut u = scratch(&today_key());
-        u.stored.rx = 2 * 1024 * 1024 * 1024; // 2 GiB
+        u.stored.days[0].rx = 2 * 1024 * 1024 * 1024; // 2 GiB
         let pct = u.quota_pct(1.0).unwrap();
         assert!((pct - 200.0).abs() < 0.01, "expected 200%, got {pct}");
         assert_eq!(u.quota_pct(2.0), Some(pct / 2.0));
+    }
+
+    #[test]
+    fn history_is_short_keys_oldest_first() {
+        // The Data page draws these directly, so the pairing of a label and its
+        // total is the contract.
+        let u = with_days(&["2026-09-14", "2026-09-15"], 7);
+        assert_eq!(
+            u.history(),
+            vec![("09-14".to_string(), 1000), ("09-15".to_string(), 1000)]
+        );
+        // Oldest first, so the reader's eye moves forward in time.
+        assert_eq!(u.today_key(), "09-15");
     }
 
     #[test]

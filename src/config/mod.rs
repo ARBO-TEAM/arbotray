@@ -33,9 +33,7 @@ pub const DEFAULT_JSON: &str = r##"{
     "opacity": 0
   },
   "retention": {
-    "raw_days": 7,
-    "minute_days": 30,
-    "hour_days": 365
+    "days": 7
   },
   "quota_gb": 0.0
 }"##;
@@ -83,12 +81,16 @@ pub struct Theme {
     pub opacity: u8,
 }
 
+/// How much usage history to keep. One value, because there is one kind of
+/// record: a day's byte total. The file this replaced described a three-tier
+/// raw/minute/hour store that nothing ever built, and a field that promises
+/// storage nothing writes is worse than a smaller honest one.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Retention {
-    pub raw_days: u32,
-    pub minute_days: u32,
-    pub hour_days: u32,
+    /// Days of usage history in `usage.json`. Bounded to at least one — a
+    /// window of zero would erase today's total as it was written.
+    pub days: u32,
 }
 
 // --- bounds ---------------------------------------------------------------
@@ -182,11 +184,7 @@ impl Default for Theme {
 
 impl Default for Retention {
     fn default() -> Self {
-        Self {
-            raw_days: 7,
-            minute_days: 30,
-            hour_days: 365,
-        }
+        Self { days: 7 }
     }
 }
 

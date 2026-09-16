@@ -813,6 +813,11 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
         }
         DATA => {
             push("Today", &model.usage_text);
+            // The caption carries the caveat, not the number. When the file no
+            // longer reaches back to the first of the month the sum is of the
+            // recent past only, and "Month so far" says so where a reader will
+            // actually look.
+            push(month_label(model), &model.month_text);
         }
         // The Settings page has no metric on it: every line it shows is a
         // caption from `SET_ROW_LABELS` beside a control. Without this arm it
@@ -830,6 +835,37 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
         }
     }
     out
+}
+
+/// How many trailing days the Data page lists. The whole retention window is
+/// often a month of rows; the last week is what the page is opened to see, and
+/// the month total above it already accounts for the rest.
+const USAGE_ROWS: usize = 7;
+
+/// The Data page's day rows, oldest first, as `(MM-DD, total)`.
+///
+/// Rendered here rather than through `page_rows` because their labels are
+/// runtime dates, not the `&'static str` captions the metric pages use.
+fn usage_rows(model: &TrayModel) -> Vec<(String, u64)> {
+    let skip = model.usage_days.len().saturating_sub(USAGE_ROWS);
+    model
+        .usage_days
+        .iter()
+        .skip(skip)
+        .map(|(day, bytes)| (day.clone(), *bytes))
+        .collect()
+}
+
+/// The month row's caption. Empty — and therefore rowless — until the counter
+/// has a day to belong to.
+fn month_label(model: &TrayModel) -> &'static str {
+    if model.month_text.is_empty() {
+        ""
+    } else if model.month_partial {
+        "Month so far"
+    } else {
+        "Month"
+    }
 }
 
 /// Whether a page has anything for the sparkline to say. The traffic history
@@ -1419,6 +1455,25 @@ fn paint(hwnd: HWND, state: &UiState) {
             y += row_h;
         }
 
+        // The Data page's day-by-day breakdown, under the two totals above it.
+        // Its rows carry runtime dates rather than the metric pages' fixed
+        // captions, which is why they are not in `page_rows`.
+        if page == DATA {
+            for (day, bytes) in usage_rows(&state.model) {
+                draw(dc, state.font, &day, x0, y, x1, DT_LEFT);
+                draw(
+                    dc,
+                    state.bold,
+                    &crate::telemetry::usage::format_size(bytes),
+                    x0,
+                    y,
+                    x1,
+                    DT_RIGHT | DT_END_ELLIPSIS,
+                );
+                y += row_h;
+            }
+        }
+
         // The Settings page's captions. They sit on the same bands as the
         // controls `layout_settings` places, from the same constants, so a row
         // and its caption cannot drift even though two functions draw them.
@@ -1598,6 +1653,9 @@ mod tests {
             dns_text: "192.168.1.1, 8.8.8.8".into(),
             usage_text: "1.4G".into(),
             quota_alert: false,
+            month_text: "41.2G".into(),
+            month_partial: false,
+            usage_days: vec![("09-14".into(), 1000), ("09-15".into(), 2000)],
             history: vec![1, 2, 3],
         }
     }
@@ -1905,9 +1963,58 @@ mod tests {
     #[test]
     fn the_daily_total_has_a_page_of_its_own() {
         let data = page_rows(DATA, &full());
-        assert_eq!(data.len(), 1);
         assert_eq!(data[0], ("Today", "1.4G".to_string()));
+        assert_eq!(data[1], ("Month", "41.2G".to_string()));
         assert!(page_shows_graph(DATA), "the total is a traffic story too");
+    }
+
+    #[test]
+    fn a_partial_month_says_so_in_its_label() {
+        // The sum only covers the days the file still holds. The caveat has to
+        // live in the caption: a number the reader has to decode twice is a
+        // number they misread, and "41.2G" with no qualifier claims a month.
+        let partial = TrayModel {
+            month_partial: true,
+            ..full()
+        };
+        assert_eq!(labels(DATA, &partial)[1], "Month so far");
+        assert_eq!(labels(DATA, &full())[1], "Month");
+    }
+
+    #[test]
+    fn the_data_page_lists_the_recent_days_oldest_first() {
+        let model = TrayModel {
+            usage_days: vec![
+                ("09-11".into(), 1),
+                ("09-12".into(), 2),
+                ("09-13".into(), 3),
+                ("09-14".into(), 4),
+            ],
+            ..full()
+        };
+        assert_eq!(
+            usage_rows(&model),
+            vec![
+                ("09-11".to_string(), 1),
+                ("09-12".to_string(), 2),
+                ("09-13".to_string(), 3),
+                ("09-14".to_string(), 4),
+            ]
+        );
+
+        // A full window keeps only the newest `USAGE_ROWS`, so the page cannot
+        // grow past the bottom of the window.
+        let long: Vec<(String, u64)> = (0..30)
+            .map(|i| (format!("09-{i:02}"), i as u64))
+            .collect();
+        let model = TrayModel {
+            usage_days: long,
+            ..full()
+        };
+        let rows = usage_rows(&model);
+        assert_eq!(rows.len(), USAGE_ROWS);
+        assert_eq!(rows.first().unwrap().0, "09-23", "only the newest survive");
+        assert_eq!(rows.last().unwrap().0, "09-29", "the newest day must stay");
     }
 
     #[test]

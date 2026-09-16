@@ -56,6 +56,17 @@ pub struct TrayModel {
     /// Today's total is over the configured plan. Drives a colour swap, since
     /// text in the taskbar has no room for an icon.
     pub quota_alert: bool,
+    /// Traffic over the current month, e.g. `41.2G`. Page detail: the strip
+    /// shows today, and today alone cannot answer "is this month unusual?".
+    pub month_text: String,
+    /// The month total sums only the days the file still holds, so it is a
+    /// partial month. Said in the row's *label* rather than in the number,
+    /// because a value the reader has to decode twice is a value they misread.
+    pub month_partial: bool,
+    /// The last few days, oldest first, as `(MM-DD, total)`. The Data page
+    /// draws these; the strip never does. Amended by reference to `Usage`
+    /// rather than as a rendered string because each row is its own label.
+    pub usage_days: Vec<(String, u64)>,
     /// Recent download throughput, oldest first — the mini-sparkline source.
     pub history: Vec<u64>,
 }

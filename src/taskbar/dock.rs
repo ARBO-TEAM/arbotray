@@ -293,6 +293,13 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         wifi_name: None,
         usage_text: field(cfg.show.usage, "9999.9G"),
         quota_alert: false,
+        // Still page detail, and empty for the same reason as the rest: the
+        // month total and the day rows belong to the Data page, and reserving
+        // width for nine rows of text that never draw would be the widest
+        // mistake in this function.
+        month_text: String::new(),
+        month_partial: false,
+        usage_days: Vec::new(),
         history: if cfg.show.sparkline {
             vec![0; RESERVED_HISTORY]
         } else {
