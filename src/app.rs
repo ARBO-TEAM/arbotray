@@ -1,0 +1,135 @@
+//! Orchestrator: wires config, telemetry and the taskbar window together.
+//!
+//! Threading: the taskbar window owns its thread because Win32 demands that a
+//! window's message loop live where it was created. Telemetry polls on a
+//! background thread and hands `TrayModel`s across a channel, waking the UI
+//! with a `PostMessageW` so nothing has to poll on a timer.
+
+use std::time::Duration;
+
+use crate::config::Config;
+use crate::taskbar::{Tray, TrayModel};
+use crate::telemetry::Sampler;
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::core::w;
+
+/// How many samples the mini-sparkline keeps. 60 at 1 Hz = one minute.
+pub const HISTORY_LEN: usize = 60;
+
+pub fn run() -> i32 {
+    let _guard = match SingleInstance::acquire() {
+        Single::First(guard) => guard,
+        Single::AlreadyRunning => return 0,
+    };
+
+    // DPI awareness must be set before any window exists, or the tray child
+    // window renders at the wrong scale on high-DPI displays.
+    set_dpi_awareness();
+
+    let cfg = Config::load();
+
+    let (tray, notifier) = match Tray::attach(&cfg) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("arbotray: cannot attach to taskbar: {e}");
+            return 1;
+        }
+    };
+
+    let interval = Duration::from_millis(cfg.interval_ms.clamp(100, 10_000) as u64);
+    let visible = cfg.clone();
+    let telemetry = std::thread::Builder::new()
+        .name("telemetry".into())
+        .spawn(move || telemetry_loop(notifier, visible, interval));
+
+    if let Err(e) = telemetry {
+        eprintln!("arbotray: cannot start telemetry thread: {e}");
+        return 1;
+    }
+
+    let mut tray = tray;
+    if let Err(e) = tray.message_loop() {
+        eprintln!("arbotray: message loop failed: {e}");
+        return 1;
+    }
+    0
+}
+
+/// Polls forever, pushing a freshly formatted model on each tick.
+/// The `Sampler` is built *inside* the thread: several collectors own raw
+/// Win32 handles and are not `Send`.
+fn telemetry_loop(notifier: crate::taskbar::Notifier, cfg: Config, interval: Duration) {
+    let mut sampler = Sampler::new();
+    let mut history: Vec<u64> = Vec::with_capacity(HISTORY_LEN);
+
+    loop {
+        let metric = sampler.poll();
+        let mut model = TrayModel::from_metric(&metric, &cfg);
+
+        if let Some(net) = metric.net {
+            if history.len() == HISTORY_LEN {
+                history.remove(0);
+            }
+            history.push(net.rx_bps);
+        }
+        model.history = if cfg.show.sparkline {
+            history.clone()
+        } else {
+            Vec::new()
+        };
+
+        notifier.send(model);
+        std::thread::sleep(interval);
+    }
+}
+
+/// Per-monitor-v2 DPI awareness. Failure is survivable — the app just renders
+/// slightly soft on scaled displays — so this is deliberately best-effort.
+fn set_dpi_awareness() {
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+// --- single instance ------------------------------------------------------
+
+enum Single {
+    First(SingleInstance),
+    AlreadyRunning,
+}
+
+/// A named mutex. Dropping the last handle is what releases the claim, so this
+/// deliberately holds the `HANDLE` rather than relying on process exit.
+struct SingleInstance(HANDLE);
+
+impl SingleInstance {
+    fn acquire() -> Single {
+        unsafe {
+            match CreateMutexW(None, true, w!("ArboTray.SingleInstance")) {
+                Ok(handle) => {
+                    if GetLastError() == ERROR_ALREADY_EXISTS {
+                        // We still own a handle to the existing mutex; drop it
+                        // so we don't keep the other instance alive.
+                        let _ = CloseHandle(handle);
+                        Single::AlreadyRunning
+                    } else {
+                        Single::First(SingleInstance(handle))
+                    }
+                }
+                Err(_) => Single::AlreadyRunning,
+            }
+        }
+    }
+}
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
