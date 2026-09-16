@@ -70,8 +70,24 @@ Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, 
 | `theme.alert` | Colour for the whole run once the data plan is exceeded |
 | `theme.font_size`, `theme.opacity` | Point size; `opacity: 0` samples the taskbar background |
 | `quota_gb` | Monthly allowance. `0` disables the over-quota warning |
+| `widget.enabled` | Show the desktop widget on startup |
+| `widget.show.*` | Which blocks it draws: `net`, `latency`, `hardware`, `network`, `usage`, `system` |
+| `widget.x` / `widget.y` | Remembered corner, in screen pixels. `null` picks the work area's top-right |
+| `widget.always_on_top` | Keep the panel above other windows |
 
 A malformed colour degrades to a readable default rather than taking the tray down.
+
+## Desktop widget
+
+The taskbar strip is one run of text in whatever width is left beside the clock, so everything that will not fit — the adapter, the address, the disk list, the machine name, the day-by-day totals — is otherwise page detail that only the dashboard can show. **Desktop widget** on the Settings page puts that detail on the desktop as a floating panel of labelled rows.
+
+It is a top-level window rather than a taskbar child, which is what makes its two gestures possible. `WS_EX_LAYERED` is refused by `Shell_TrayWnd`, so the strip has to sample a colour underneath itself; a top-level window takes a real alpha and drags anywhere on the desktop for free, using Windows' own move loop — including edge snapping. Grab anywhere to move it, click the `×` in the corner to hide it. The position is remembered, so it comes back where it was left.
+
+The close box hides the panel without clearing the setting, so the checkbox stays the single record of whether the widget is meant to be on. Ticking it and saving is how the panel comes back.
+
+Blocks are switched with `widget.show.*`, one flag per group of rows, and a row whose reading is blank is dropped rather than drawn as a zero — a desktop with no battery gets no `Battery` line. A block that loses every row takes its heading with it.
+
+`theme.opacity` means "sample the taskbar" for the strip and nothing at all for a floating window, so the panel reads `0` as fully opaque instead of leaving itself invisible.
 
 ## Data usage
 
