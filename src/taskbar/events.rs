@@ -47,6 +47,14 @@ pub struct WindowState {
     /// hands it to the dashboard — it does not read the results, which arrive
     /// in the model through the telemetry thread's own clone of the handle.
     pub speed: SpeedTest,
+    /// The desktop widget, when one is up.
+    ///
+    /// It lives here rather than inside the dashboard because it has to be
+    /// created and destroyed from this thread — and because this is the window
+    /// that already receives every sample, so the panel needs no channel of its
+    /// own: it is repainted from the same model, in the same arm of the same
+    /// message.
+    pub widget: Option<crate::widget::Widget>,
 }
 
 /// Window procedure for the docked tray child.
@@ -124,6 +132,13 @@ pub unsafe extern "system" fn wnd_proc(
                     // The strip's width is reserved from `worst_case(cfg)`, so
                     // showing a tile that was hidden needs a wider window.
                     resize_to_fit(state, hwnd);
+                    // The panel is built, destroyed or restyled here for the
+                    // same reason the strip is: this is the one place a
+                    // Settings-page edit reaches this thread.
+                    sync_widget(state);
+                }
+                if let Some(widget) = &mut state.widget {
+                    widget.update(&state.model, &state.cfg);
                 }
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
@@ -190,6 +205,12 @@ pub unsafe extern "system" fn wnd_proc(
                 // Take the dashboard down with us. Leaving a top-level window
                 // behind an exiting process would strand it on screen.
                 ui::close(state.ui);
+                // The panel too, and before the state that backs it is freed:
+                // the window procedure reaches its paint state through a
+                // pointer into that box, so the window has to go first.
+                if let Some(mut widget) = state.widget.take() {
+                    widget.destroy();
+                }
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -214,6 +235,39 @@ fn open_dashboard(state: &mut WindowState) {
     ) {
         state.ui = hwnd;
         ui::show(hwnd);
+    }
+}
+
+/// Bring the desktop widget into line with the config that was just saved.
+///
+/// Three cases, and no fourth: nothing to do when the setting has not moved, a
+/// build when it has just been switched on, and a teardown when it has just
+/// been switched off. A panel already up takes its new alpha and colours in
+/// place, and only moves when the layout's own size changed — the position is
+/// the user's, and a theme edit is not a reason to undo a drag.
+fn sync_widget(state: &mut WindowState) {
+    match (state.cfg.widget.enabled, state.widget.is_some()) {
+        (true, false) => {
+            state.widget = crate::widget::Widget::create(&state.cfg, &state.model, state.instance);
+        }
+        (false, true) => {
+            if let Some(mut widget) = state.widget.take() {
+                widget.destroy();
+            }
+        }
+        (true, true) => {
+            if let Some(widget) = &mut state.widget {
+                // `true` because a saved config can have changed the font size,
+                // which is the one setting that changes the layout's own size.
+                widget.apply(&state.cfg, &state.model, true);
+                // Shown again, because the close box hides the panel without
+                // touching the setting — so without this a panel dismissed
+                // earlier could only be recovered by unticksing and reticking
+                // the box. Landing on Save is a clear enough "show me again".
+                widget.set_visible(true);
+            }
+        }
+        (false, false) => {}
     }
 }
 

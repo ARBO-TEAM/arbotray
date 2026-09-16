@@ -155,6 +155,10 @@ impl Tray {
                 ui: HWND::default(),
                 telemetry: shared,
                 speed,
+                // Built below, once the strip exists. Not in this literal
+                // because `create` needs the window's own `HINSTANCE`, which is
+                // the same module handle but reads better named once.
+                widget: None,
             });
 
             // Reserve width from a worst-case sample so changing digits never
@@ -201,6 +205,19 @@ impl Tray {
                     let _ = DestroyWindow(hwnd);
                     return Err(format!("tray icon: {e}"));
                 }
+            }
+
+            // The desktop widget, if the last run left it switched on.
+            //
+            // Built after the strip rather than before it: the panel is the
+            // optional surface, and a failure to create it — which `create`
+            // already reports as `None` — must not cost the user their taskbar
+            // display. Created here rather than in the Settings page because the
+            // window belongs to this thread, and this is the thread that has the
+            // sample to fill it with.
+            if cfg.widget.enabled {
+                let model = state.model.clone();
+                state.widget = crate::widget::Widget::create(cfg, &model, HINSTANCE(module.0));
             }
 
             // The window owns one handle to the shared config, the notifier the

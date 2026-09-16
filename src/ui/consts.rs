@@ -72,6 +72,14 @@ pub(crate) const SET_WATCH_RESET: i32 = SET_ID_BASE + 21;
 /// checkbox would then report a state that is not the one in force.
 pub(crate) const SET_AUTOSTART: i32 = SET_ID_BASE + 22;
 
+/// The Settings page's show-the-desktop-widget checkbox.
+///
+/// Unlike the startup entry beside it, this one *is* a config field: the panel
+/// is ours, so `config.json` is the only thing that has to agree with it. It is
+/// staged like the rest of the page rather than applied on the click, because
+/// the dashboard cannot create a window the tray owns — see `ui::update`.
+pub(crate) const SET_WIDGET: i32 = SET_ID_BASE + 23;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings

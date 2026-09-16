@@ -6,7 +6,7 @@ use crate::config::{
 use crate::ui::consts::{
     BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG, SET_FONT,
     SET_INTERVAL, SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP,
-    SET_WATCH, SET_WATCH_RESET, TILE_IDS, TILE_LABELS, WM_ENABLE,
+    SET_WATCH, SET_WATCH_RESET, SET_WIDGET, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
@@ -43,6 +43,11 @@ pub(crate) struct SettingsForm {
     foreground: String,
     alert: String,
     opacity: i32,
+    /// Show the desktop widget. Staged like the rest of the page rather than
+    /// acted on at the click, because creating the panel is window work on the
+    /// tray's thread and this window cannot reach it — the save hands the
+    /// config over instead, exactly as a theme edit does.
+    pub(crate) widget: bool,
 }
 
 impl SettingsForm {
@@ -64,6 +69,7 @@ impl SettingsForm {
             foreground: cfg.theme.foreground.clone(),
             alert: cfg.theme.alert.clone(),
             opacity: cfg.theme.opacity as i32,
+            widget: cfg.widget.enabled,
         }
     }
 
@@ -89,6 +95,7 @@ impl SettingsForm {
         cfg.theme.foreground = self.foreground.trim().to_string();
         cfg.theme.alert = self.alert.trim().to_string();
         cfg.theme.opacity = self.opacity.clamp(0, 255) as u8;
+        cfg.widget.enabled = self.widget;
         Ok(cfg)
     }
 }
@@ -170,6 +177,7 @@ pub(crate) fn read_form(hwnd: HWND) -> SettingsForm {
         foreground: text_of(hwnd, SET_FG).unwrap_or_default(),
         alert: text_of(hwnd, SET_ALERT).unwrap_or_default(),
         opacity: parse_int(text_of(hwnd, SET_OPACITY).as_deref()).unwrap_or(-1),
+        widget: is_checked(hwnd, SET_WIDGET),
     }
 }
 
@@ -205,6 +213,7 @@ pub(crate) fn write_form(hwnd: HWND, cfg: &Config) {
     // page is written, because the registry, not the config, is what Windows
     // consults — see `crate::autostart`.
     set_check(hwnd, SET_AUTOSTART, crate::autostart::enabled());
+    set_check(hwnd, SET_WIDGET, form.widget);
     // The quota field is only meaningful while its switch is on.
     set_enabled(hwnd, SET_QUOTA, form.quota_on);
 }
@@ -332,6 +341,7 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     // every text field's does. Giving the checkbox its own text as well would
     // print the setting twice.
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_AUTOSTART);
+    create_control(parent, state, w!("BUTTON"), "", check_style, SET_WIDGET);
     let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
@@ -402,7 +412,8 @@ pub(crate) const ROW_FG: usize = 8;
 pub(crate) const ROW_ALERT: usize = 9;
 pub(crate) const ROW_OPACITY: usize = 10;
 pub(crate) const ROW_STARTUP: usize = 11;
-pub(crate) const ROW_SAVE: usize = 12;
+pub(crate) const ROW_WIDGET: usize = 12;
+pub(crate) const ROW_SAVE: usize = 13;
 pub(crate) const SET_ROW_COUNT: usize = ROW_SAVE + 1;
 
 /// The Settings page's captions, one per row in paint order, with whatever a
@@ -426,12 +437,13 @@ pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
     "Alert   #RRGGBB",
     "Opacity   0-255",
     "Start with Windows",
+    "Desktop widget",
     "Write config.json",
 ];
 
 /// Which row each non-tile control belongs on. One table drives both the layout
 /// and the captions, so a control cannot end up under the wrong line.
-pub(crate) const FIELD_ROWS: [(i32, usize); 11] = [
+pub(crate) const FIELD_ROWS: [(i32, usize); 12] = [
     (SET_INTERVAL, ROW_REFRESH),
     (SET_QUOTA_ON, ROW_PLAN),
     (SET_QUOTA, ROW_PLAN),
@@ -441,6 +453,7 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 11] = [
     (SET_ALERT, ROW_ALERT),
     (SET_OPACITY, ROW_OPACITY),
     (SET_AUTOSTART, ROW_STARTUP),
+    (SET_WIDGET, ROW_WIDGET),
     (SET_SAVE, ROW_SAVE),
     (SET_RESET, ROW_SAVE),
 ];
