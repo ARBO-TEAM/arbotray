@@ -43,7 +43,7 @@ What you may still see is **SmartScreen**, not a detection. A downloaded copy ca
 cargo build --release
 ```
 
-The binary lands at `target/release/arbotray.exe` (~250 KB).
+The binary lands at `target/release/arbotray.exe` (~485 KB).
 
 ## What it shows
 
@@ -54,7 +54,9 @@ The binary lands at `target/release/arbotray.exe` (~250 KB).
 - **Today's data usage** — running total, in the taskbar and in the icon tooltip
 - **Mini-sparkline** — recent download throughput
 
-Hovering the tray icon shows the full readout plus the connected network name, which is the one field too long for the taskbar.
+Hovering the tray icon shows the full readout — every enabled field under its own label, the two rates under ↓ and ↑ — plus the connected network name, which is the one field too long for the taskbar. The lines are fitted to the tooltip, so the last one is dropped rather than clipped when a machine reports everything at once.
+
+Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, Network, System, Data, Ports, Speed Test, Stopwatch — over the same readings, plus a chart, a built-in speed test and a stopwatch.
 
 ## Config
 
