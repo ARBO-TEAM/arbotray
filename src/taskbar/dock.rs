@@ -11,6 +11,7 @@ use crate::taskbar::events::{WM_TRAY_UPDATE, WindowState, wnd_proc};
 use crate::taskbar::icon::Icon;
 use crate::taskbar::render::Renderer;
 use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -40,11 +41,30 @@ pub struct Tray {
     state: Box<WindowState>,
 }
 
+/// Hand a new config to the telemetry thread, which formats every sample
+/// through it.
+///
+/// A poisoned mutex is recovered from rather than propagated: the telemetry
+/// thread cannot panic with the lock held (its body is arithmetic and a channel
+/// send), and a poisoned read is still a readable `Config`. Refusing here would
+/// leave the tray painting a setting the file no longer holds.
+pub fn share_config(shared: &Arc<Mutex<Config>>, cfg: &Config) {
+    match shared.lock() {
+        Ok(mut guard) => *guard = cfg.clone(),
+        Err(poisoned) => *poisoned.into_inner() = cfg.clone(),
+    }
+}
+
 /// Handed to the telemetry thread. Safe to call from any thread: it only sends
 /// on a channel and posts a message, both of which are thread-safe.
 pub struct Notifier {
     sender: Sender<TrayModel>,
     hwnd: HWND,
+    /// The live config, shared with the window. The telemetry thread reads it
+    /// once per tick rather than owning a copy, so a Settings-page edit reaches
+    /// the tile it changes within one poll — and the refresh period change
+    /// takes effect on the sleep that follows the same tick.
+    config: Arc<Mutex<Config>>,
 }
 
 // SAFETY: `PostMessageW` is documented as callable against a window owned by
@@ -53,6 +73,18 @@ pub struct Notifier {
 unsafe impl Send for Notifier {}
 
 impl Notifier {
+    /// The current config, for the telemetry thread to format with.
+    ///
+    /// A clone per tick rather than a borrow held across the sleep: the UI
+    /// thread takes the lock on a settings edit, and holding it between ticks
+    /// would stall that write for up to the refresh period.
+    pub fn config(&self) -> Config {
+        match self.config.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     /// Queue a sample and wake the UI thread. Failures are ignored: a closed
     /// channel or a destroyed window just means shutdown is under way.
     pub fn send(&self, model: TrayModel) {
@@ -100,6 +132,11 @@ impl Tray {
             GetWindowRect(notify, &mut notify_rect)
                 .map_err(|e| format!("GetWindowRect(TrayNotifyWnd): {e}"))?;
 
+            // Shared with the telemetry thread, which formats every sample
+            // through it. This is what makes a tile switched off in the
+            // Settings page stop painting within a tick — a copy per side would
+            // keep the old visibility until the next launch.
+            let shared = Arc::new(Mutex::new(cfg.clone()));
             let (sender, receiver) = channel();
             let mut state = Box::new(WindowState {
                 receiver,
@@ -110,6 +147,7 @@ impl Tray {
                 icon: None,
                 instance: HINSTANCE(module.0),
                 ui: HWND::default(),
+                telemetry: shared,
             });
 
             // Reserve width from a worst-case sample so changing digits never
@@ -158,7 +196,13 @@ impl Tray {
                 }
             }
 
-            let notifier = Notifier { sender, hwnd };
+            // The window owns one handle to the shared config, the notifier the
+            // other for the telemetry thread.
+            let notifier = Notifier {
+                sender,
+                hwnd,
+                config: Arc::clone(&state.telemetry),
+            };
             Ok((Tray { hwnd, state }, notifier))
         }
     }

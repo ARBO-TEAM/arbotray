@@ -5,9 +5,7 @@
 //! background thread and hands `TrayModel`s across a channel, waking the UI
 //! with a `PostMessageW` so nothing has to poll on a timer.
 
-use std::time::Duration;
-
-use crate::config::Config;
+use crate::config::{Config, interval_duration};
 use crate::taskbar::{Tray, TrayModel};
 use crate::telemetry::Sampler;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
@@ -37,11 +35,9 @@ pub fn run() -> i32 {
         }
     };
 
-    let interval = Duration::from_millis(cfg.interval_ms.clamp(100, 10_000) as u64);
-    let visible = cfg.clone();
     let telemetry = std::thread::Builder::new()
         .name("telemetry".into())
-        .spawn(move || telemetry_loop(notifier, visible, interval));
+        .spawn(move || telemetry_loop(notifier));
 
     if let Err(e) = telemetry {
         eprintln!("arbotray: cannot start telemetry thread: {e}");
@@ -59,7 +55,13 @@ pub fn run() -> i32 {
 /// Polls forever, pushing a freshly formatted model on each tick.
 /// The `Sampler` is built *inside* the thread: several collectors own raw
 /// Win32 handles and are not `Send`.
-fn telemetry_loop(notifier: crate::taskbar::Notifier, cfg: Config, interval: Duration) {
+///
+/// The config is re-read from the notifier every tick rather than captured at
+/// startup. This is the half of a Settings-page edit that the window cannot do
+/// for itself: tile visibility and the refresh period are only ever consulted
+/// here, so a captured copy would leave the file changed and the taskbar
+/// unchanged — the failure the Settings page exists to remove.
+fn telemetry_loop(notifier: crate::taskbar::Notifier) {
     let mut sampler = Sampler::new();
     let mut history: Vec<u64> = Vec::with_capacity(HISTORY_LEN);
     // Loaded once and carried across ticks: it accumulates deltas, so a fresh
@@ -67,6 +69,7 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier, cfg: Config, interval: Dur
     let mut usage = crate::telemetry::Usage::load();
 
     loop {
+        let cfg = notifier.config();
         let metric = sampler.poll();
 
         // Feed the quota counter from the raw cumulative octets, not from
@@ -97,7 +100,9 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier, cfg: Config, interval: Dur
         };
 
         notifier.send(model);
-        std::thread::sleep(interval);
+        // The sleep is rebuilt from the config just read, so an interval edit
+        // takes effect on the very next wait rather than at the next launch.
+        std::thread::sleep(interval_duration(&cfg));
     }
 }
 

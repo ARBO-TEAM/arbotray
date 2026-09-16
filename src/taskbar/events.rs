@@ -7,9 +7,10 @@
 use crate::config::Config;
 use crate::taskbar::icon::{self, CMD_OPEN, CMD_QUIT, Icon, show_menu};
 use crate::taskbar::render::Renderer;
-use crate::taskbar::TrayModel;
+use crate::taskbar::{TrayModel, dock};
 use crate::ui;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -36,6 +37,11 @@ pub struct WindowState {
     /// The dashboard, created on first use and invalid until then. It lives on
     /// this thread, so it is written to directly rather than messaged.
     pub ui: HWND,
+    /// The same config the telemetry thread formats with, shared rather than
+    /// copied. A copy would mean a tile switched off in the Settings page kept
+    /// painting until the next launch — the file would change and the taskbar
+    /// would not, which is the exact failure this whole feature exists to fix.
+    pub telemetry: Arc<Mutex<Config>>,
 }
 
 /// Window procedure for the docked tray child.
@@ -88,7 +94,26 @@ pub unsafe extern "system" fn wnd_proc(
                 }
                 // The dashboard is fed here rather than from the telemetry
                 // thread: same thread as the window, so no queue is needed.
-                ui::update(state.ui, &state.model);
+                //
+                // It is also the one place a Settings-page edit can reach this
+                // window: `update` returns a config when the user has saved
+                // one, and adopting it here is what makes the change visible
+                // without a restart. `set_metrics` rebuilds the font, which is
+                // what a size or colour change needs, and the repaint below
+                // redraws the tile run from the new config.
+                if let Some(cfg) = ui::update(state.ui, &state.model) {
+                    // The tray's own copy, then the telemetry thread's. The
+                    // second is what a tile-visibility or refresh change needs:
+                    // `TrayModel::from_metric` reads `show` and the poll loop
+                    // reads `interval_ms`, and neither of those is visible
+                    // anywhere on this thread.
+                    state.cfg = cfg;
+                    dock::share_config(&state.telemetry, &state.cfg);
+                    state.renderer.set_metrics(&state.cfg, dpi_of(hwnd));
+                    // The strip's width is reserved from `worst_case(cfg)`, so
+                    // showing a tile that was hidden needs a wider window.
+                    resize_to_fit(state, hwnd);
+                }
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
@@ -197,6 +222,37 @@ fn menu(state: &mut WindowState, hwnd: HWND) {
 /// Low 16 bits of a `WPARAM`, which is where `WM_DPICHANGED` packs the new DPI.
 pub fn low_word(value: usize) -> u16 {
     (value & 0xFFFF) as u16
+}
+
+/// The window's current DPI, or 96 when it cannot be read. `set_metrics` takes
+/// the DPI as well as the config, and re-reading it here rather than caching it
+/// means a settings edit on a display that was scaled after launch still gets
+/// the right font.
+fn dpi_of(hwnd: HWND) -> u32 {
+    // SAFETY: `hwnd` is our own live window; the call reads a scalar.
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) };
+    if dpi == 0 { 96 } else { dpi }
+}
+
+/// Widen the strip to whatever the new config's worst-case sample needs.
+///
+/// The window's width is reserved once at attach from `worst_case(cfg)`, so a
+/// tile switched on in the Settings page would paint into a strip sized for the
+/// tiles that were on at launch — clipped, with no way to notice. Only the
+/// width moves: the dock position and the height belong to the taskbar.
+fn resize_to_fit(state: &WindowState, hwnd: HWND) {
+    let width = state.renderer.needed_width(&dock::worst_case(&state.cfg)).max(1);
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    // SAFETY: `hwnd` is our own live window.
+    unsafe {
+        if windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect).is_err() {
+            return;
+        }
+        if rect.right - rect.left == width {
+            return;
+        }
+        let _ = MoveWindow(hwnd, rect.left, rect.top, width, rect.bottom - rect.top, true);
+    }
 }
 
 /// Width of the window's client area, or 0 when it cannot be read.

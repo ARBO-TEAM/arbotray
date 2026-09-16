@@ -18,7 +18,9 @@
 //! Closing it hides it. The taskbar display is the product; the window is a
 //! detail, and quitting on close would make a glance at the numbers fatal.
 
-use crate::config::Config;
+use crate::config::{
+    Config, QUOTA_MAX_GB, QUOTA_MIN_GB, clamp_font_size, clamp_interval_ms, clamp_quota_gb,
+};
 use crate::taskbar::TrayModel;
 use crate::taskbar::icon::app_icon;
 use crate::taskbar::render::{parse_color, sparkline_points};
@@ -31,17 +33,21 @@ use windows::Win32::Graphics::Gdi::{
     SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetClientRect, GetSystemMetrics, GetWindowLongPtrW, HMENU, IsIconic, IsWindow, LB_ADDSTRING,
-    LB_ERR, LB_GETCURSEL, LB_SETCURSEL, LBS_NOTIFY, LBS_NOINTEGRALHEIGHT, LBN_SELCHANGE, MINMAXINFO,
-    MoveWindow, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORLISTBOX, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SIZE, WNDCLASSW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+    BS_AUTOCHECKBOX, BS_PUSHBUTTON, BM_GETCHECK, BM_SETCHECK, CREATESTRUCTW, CW_USEDEFAULT,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, ES_AUTOHSCROLL, ES_NUMBER, GWLP_USERDATA,
+    GetClientRect, GetDlgItem, GetSystemMetrics, GetWindowLongPtrW, GetWindowTextW,
+    GetWindowTextLengthW, HMENU, IsIconic, IsWindow, LB_ADDSTRING, LB_ERR, LB_GETCURSEL,
+    LB_SETCURSEL, LBS_NOTIFY, LBS_NOINTEGRALHEIGHT, LBN_SELCHANGE, MINMAXINFO, MoveWindow,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    SetWindowTextW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SIZE, WNDCLASSW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
     WS_VISIBLE, WS_VSCROLL,
 };
-use windows::core::{PCWSTR, w};
+
+use windows::core::{PCWSTR, PWSTR, w};
 
 /// The window class, registered on first show and reused after.
 const CLASS: PCWSTR = w!("ArboTrayWindow");
@@ -50,14 +56,505 @@ const CLASS: PCWSTR = w!("ArboTrayWindow");
 /// read back out of the low word of `WM_COMMAND`'s `wparam`.
 const LIST_ID: i32 = 1;
 
+/// Where the Settings page's controls start. Deliberately far above `LIST_ID`:
+/// the list owns 1 and nothing else may take it, and a gap leaves room for
+/// another control on an existing page without renumbering anything.
+///
+/// The Settings controls are addressed by id rather than by remembered handle
+/// values, because hiding and showing the page is a message away and the
+/// handles are read back with `GetDlgItem`. Nothing needs to keep them here.
+const SET_ID_BASE: i32 = 10;
+
+/// The tile checkboxes' ids, in `TILE_LABELS` order. Laying the grid out from
+/// this and reading it back in the same order is what keeps the nth checkbox
+/// the nth tile: there is no name-to-id lookup to get wrong.
+const TILE_IDS: [i32; 8] = [
+    SET_ID_BASE,
+    SET_ID_BASE + 1,
+    SET_ID_BASE + 2,
+    SET_ID_BASE + 3,
+    SET_ID_BASE + 4,
+    SET_ID_BASE + 5,
+    SET_ID_BASE + 6,
+    SET_ID_BASE + 7,
+];
+const SET_INTERVAL: i32 = SET_ID_BASE + 8;
+const SET_QUOTA_ON: i32 = SET_ID_BASE + 9;
+const SET_QUOTA: i32 = SET_ID_BASE + 10;
+const SET_FONT: i32 = SET_ID_BASE + 11;
+const SET_BG: i32 = SET_ID_BASE + 12;
+const SET_FG: i32 = SET_ID_BASE + 13;
+const SET_ALERT: i32 = SET_ID_BASE + 14;
+const SET_OPACITY: i32 = SET_ID_BASE + 15;
+const SET_SAVE: i32 = SET_ID_BASE + 16;
+const SET_RESET: i32 = SET_ID_BASE + 17;
+
+/// Nothing in the page is live until Save runs, so the page has to say so.
+///
+/// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings
+/// do not expose as a named constant, and `EnableWindow` is not there either.
+/// It is a documented, stable message number, so it is spelled out rather than
+/// pulling in `Win32_UI_Controls` for it.
+const WM_ENABLE: u32 = 0x000A;
+
+/// The button check state `BM_GETCHECK` returns for a ticked checkbox.
+///
+/// `BST_CHECKED` lives in `Win32_UI_Controls` with the rest of the owner-draw
+/// machinery, and enabling that feature to read one `1` is not worth it. The
+/// unchecked and indeterminate states are `0` and `2`; only the first two are
+/// used here, and the unchecked case is `0`, so nothing spells it out.
+const BST_CHECKED: isize = 1;
+
+/// Text height of a settings control at 96 DPI, and the nudge that lines its
+/// text up with the painted rows. A native control centres its text in its own
+/// rect while the content painter draws from the top, so a control put on the
+/// same band as a row sits a couple of pixels low without this.
+const CTL_H: i32 = 24;
+const CTL_NUDGE: i32 = 3;
+
+/// Width of one field control — an edit box or the Save button — at 96 DPI.
+/// Fixed rather than proportional: at the minimum window width the content
+/// column is narrow enough that a proportional field would clip `#E6E6E6`.
+const FIELD_W: i32 = 150;
+
+/// The taskbar tiles' checkbox labels, in `TILE_IDS` order. They are the
+/// config file's own field names, so what the page shows is what the file says.
+const TILE_LABELS: [&str; 8] = [
+    "net_down", "net_up", "latency", "cpu", "ram", "wifi", "usage", "sparkline",
+];
+
 /// The pages, in the order the list shows them. Their indices are the page
 /// numbers used throughout, so the constants below name the slots rather than
 /// leaving magic numbers in the row functions.
-const PAGES: [&str; 4] = ["Overview", "Network", "System", "Data"];
+///
+/// `Settings` is **appended**. These indices are positional, so inserting it
+/// anywhere but the end would renumber every page after it — the labels would
+/// still read correctly and the routing would be wrong.
+const PAGES: [&str; 5] = ["Overview", "Network", "System", "Data", "Settings"];
 const OVERVIEW: usize = 0;
 const NETWORK: usize = 1;
 const SYSTEM: usize = 2;
 const DATA: usize = 3;
+const SETTINGS: usize = 4;
+
+/// Everything the Settings page knows, in the form it knows it: text exactly as
+/// typed, and integers parsed with a running fallback.
+///
+/// The page never holds a `Config` while the user is typing. Blanking one digit
+/// on a numeric field is a normal thing to do, and a `Config` cannot represent
+/// "no number yet" — an unparseable field would have to be either a `0` that
+/// erases the setting or an error that blocks the other six. Keeping the raw
+/// strings here means `into_config` is the one place a typed value becomes a
+/// setting, and it is a pure function that can be tested on its own.
+struct SettingsForm {
+    /// `Show` flags, in `TILE_LABELS` order.
+    tiles: [bool; 8],
+    interval: i32,
+    quota_on: bool,
+    quota: f64,
+    font_size: i32,
+    background: String,
+    foreground: String,
+    alert: String,
+    opacity: i32,
+}
+
+impl SettingsForm {
+    /// A form showing `cfg` — what the page loads on creation.
+    fn from_config(cfg: &Config) -> Self {
+        Self {
+            tiles: tile_flags(&cfg.show),
+            interval: clamp_interval_ms(cfg.interval_ms) as i32,
+            // `0` is the config's own "no plan" value, so it is displayed as
+            // the switch being off rather than as a number in the box.
+            quota_on: cfg.quota_gb > 0.0,
+            quota: if cfg.quota_gb > 0.0 {
+                cfg.quota_gb
+            } else {
+                QUOTA_MIN_GB
+            },
+            font_size: clamp_font_size(cfg.theme.font_size) as i32,
+            background: cfg.theme.background.clone(),
+            foreground: cfg.theme.foreground.clone(),
+            alert: cfg.theme.alert.clone(),
+            opacity: cfg.theme.opacity as i32,
+        }
+    }
+
+    /// The config this form describes: every field validated here, so the rest
+    /// of the app only ever sees a setting it can act on.
+    ///
+    /// Two fields are deliberately *clamped* rather than refused — the refresh
+    /// period, because a rate is a bound and not a preference, and the quota,
+    /// because a plan of zero is not a plan. The two that are refused are the
+    /// font size and the quota-when-switched-on: clamping those would let a
+    /// typo silently become a number the user never typed, and "100000" in the
+    /// size box would come back as "72" with nothing said.
+    fn into_config(&self, base: &Config) -> Result<Config, String> {
+        let font_size = validate_font_size(self.font_size)?;
+        let quota_on = validate_quota_on(self.quota_on, self.quota)?;
+
+        let mut cfg = base.clone();
+        apply_tiles(&mut cfg.show, &self.tiles);
+        cfg.interval_ms = clamp_interval_ms(self.interval.max(0) as u32);
+        cfg.quota_gb = quota_on.map_or(0.0, |gb| gb);
+        cfg.theme.font_size = font_size;
+        cfg.theme.background = self.background.trim().to_string();
+        cfg.theme.foreground = self.foreground.trim().to_string();
+        cfg.theme.alert = self.alert.trim().to_string();
+        cfg.theme.opacity = self.opacity.clamp(0, 255) as u8;
+        Ok(cfg)
+    }
+}
+
+/// Whether each tile is switched on, in `TILE_LABELS` order.
+///
+/// `Show` has no iterator over its eight `bool`s, so this mapping is written
+/// out once here. It is exhaustive on both sides, which is what stops a field
+/// being silently dropped from the page: `apply_tiles` is the inverse, and the
+/// round-trip test over them fails the moment the two stop agreeing.
+fn tile_flags(show: &crate::config::Show) -> [bool; 8] {
+    [
+        show.net_down,
+        show.net_up,
+        show.latency,
+        show.cpu,
+        show.ram,
+        show.wifi,
+        show.usage,
+        show.sparkline,
+    ]
+}
+
+/// The inverse of `tile_flags`.
+fn apply_tiles(show: &mut crate::config::Show, tiles: &[bool; 8]) {
+    show.net_down = tiles[0];
+    show.net_up = tiles[1];
+    show.latency = tiles[2];
+    show.cpu = tiles[3];
+    show.ram = tiles[4];
+    show.wifi = tiles[5];
+    show.usage = tiles[6];
+    show.sparkline = tiles[7];
+}
+
+/// The font size, or the message to show instead of saving one this app cannot
+/// build. The bound is shared with the window's own font helper.
+fn validate_font_size(size: i32) -> Result<u32, String> {
+    if size <= 0 {
+        return Err("font size must be a whole number".into());
+    }
+    let size = size as u32;
+    if clamp_font_size(size) != size {
+        return Err(format!("font size must be between 9 and 72, not {size}"));
+    }
+    Ok(size)
+}
+
+/// The quota, or the message to show. `None` is the quota switched off, which
+/// is a valid answer meaning "no plan" — not an error.
+fn validate_quota_on(on: bool, gb: f64) -> Result<Option<f64>, String> {
+    if !on {
+        return Ok(None);
+    }
+    clamp_quota_gb(gb).map(Some).ok_or_else(|| {
+        format!(
+            "quota must be a number between {QUOTA_MIN_GB} and {QUOTA_MAX_GB:.0} GB, or leave it off"
+        )
+    })
+}
+
+/// What the user left on the Settings page, read back out of the live controls.
+///
+/// This is the one piece of window state that is not in `UiState`: the values
+/// live in native controls, which keep their own state and would lose it if
+/// this were mirrored on every `WM_COMMAND`. It is only ever built while the
+/// window exists, from an `hwnd` that has already been checked.
+fn read_form(hwnd: HWND) -> SettingsForm {
+    SettingsForm {
+        tiles: std::array::from_fn(|i| is_checked(hwnd, TILE_IDS[i])),
+        // An unreadable number becomes something `into_config` refuses rather
+        // than a zero it would quietly save: `0` and "not a number" have to
+        // stay different.
+        interval: parse_int(text_of(hwnd, SET_INTERVAL).as_deref()).unwrap_or(0),
+        quota_on: is_checked(hwnd, SET_QUOTA_ON),
+        quota: parse_f64(text_of(hwnd, SET_QUOTA).as_deref()).unwrap_or(f64::NAN),
+        font_size: parse_int(text_of(hwnd, SET_FONT).as_deref()).unwrap_or(-1),
+        background: text_of(hwnd, SET_BG).unwrap_or_default(),
+        foreground: text_of(hwnd, SET_FG).unwrap_or_default(),
+        alert: text_of(hwnd, SET_ALERT).unwrap_or_default(),
+        opacity: parse_int(text_of(hwnd, SET_OPACITY).as_deref()).unwrap_or(-1),
+    }
+}
+
+/// Whether one of our checkboxes is ticked. A missing control reads as unticked
+/// rather than as an error: the control failing to exist is a layout problem,
+/// not a settings one.
+fn is_checked(hwnd: HWND, id: i32) -> bool {
+    // SAFETY: `ctl` is a control of ours; `BM_GETCHECK` needs no buffer and
+    // returns the state directly.
+    unsafe {
+        GetDlgItem(Some(hwnd), id).ok().is_some_and(|ctl| {
+            SendMessageW(ctl, BM_GETCHECK, None, None).0 == BST_CHECKED
+        })
+    }
+}
+
+/// Push a config into the live controls. Used to load the page and to undo a
+/// failed save, so the page never shows one thing and believes another.
+fn write_form(hwnd: HWND, cfg: &Config) {
+    let form = SettingsForm::from_config(cfg);
+    for (i, id) in TILE_IDS.iter().enumerate() {
+        set_check(hwnd, *id, form.tiles[i]);
+    }
+    set_text(hwnd, SET_INTERVAL, &form.interval.to_string());
+    set_check(hwnd, SET_QUOTA_ON, form.quota_on);
+    set_text(hwnd, SET_QUOTA, &format_quota(form.quota));
+    set_text(hwnd, SET_FONT, &form.font_size.to_string());
+    set_text(hwnd, SET_BG, &form.background);
+    set_text(hwnd, SET_FG, &form.foreground);
+    set_text(hwnd, SET_ALERT, &form.alert);
+    set_text(hwnd, SET_OPACITY, &form.opacity.to_string());
+    // The quota field is only meaningful while its switch is on.
+    set_enabled(hwnd, SET_QUOTA, form.quota_on);
+}
+
+/// The quota as it appears in the edit box: one decimal for a real plan, and
+/// no trailing `.0` on a whole one, because `20.0` in a field that takes a
+/// decimal is a formatting choice the user would not have made.
+fn format_quota(gb: f64) -> String {
+    if gb.fract() == 0.0 {
+        format!("{gb:.0}")
+    } else {
+        format!("{gb:.1}")
+    }
+}
+
+/// A quota is typed with a decimal point, so it cannot be parsed as an integer.
+fn parse_f64(text: Option<&str>) -> Option<f64> {
+    text?.trim().parse().ok()
+}
+
+/// `None` when the field holds something that is not a number, which every
+/// caller treats as "unusable" rather than as zero.
+fn parse_int(text: Option<&str>) -> Option<i32> {
+    text?.trim().parse().ok()
+}
+
+/// The current text of one of our own edit controls, or `None` when the
+/// control is missing or holds something that is not valid UTF-16.
+fn text_of(hwnd: HWND, id: i32) -> Option<String> {
+    // SAFETY: `hwnd` is our own live window, so `GetDlgItem` only looks up a
+    // child of it. The buffer is a live local and the length is read from the
+    // control rather than assumed, so a long paste cannot overrun it.
+    unsafe {
+        let ctl = GetDlgItem(Some(hwnd), id).ok()?;
+        let len = GetWindowTextLengthW(ctl);
+        if len <= 0 {
+            return Some(String::new());
+        }
+        let mut buf = vec![0u16; len as usize + 1];
+        let copied = GetWindowTextW(ctl, &mut buf);
+        if copied <= 0 {
+            return Some(String::new());
+        }
+        buf.truncate(copied as usize);
+        Some(String::from_utf16_lossy(&buf))
+    }
+}
+
+/// Set an edit control's text. A failure is ignored: the control is either
+/// missing, in which case there is nothing to set, or it took some of the text
+/// and the next load fixes it.
+fn set_text(hwnd: HWND, id: i32, value: &str) {
+    // SAFETY: the id names one of our own children, and `value` outlives the
+    // call — `SetWindowTextW` copies it.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+            let mut wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = SetWindowTextW(ctl, PWSTR(wide.as_mut_ptr()));
+        }
+    }
+}
+
+fn set_check(hwnd: HWND, id: i32, value: bool) {
+    // SAFETY: `BM_SETCHECK` takes the state by value and needs no buffer.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+            let state = if value { BST_CHECKED } else { 0 };
+            SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(state as usize)), None);
+        }
+    }
+}
+
+/// Grey out a control that has no effect in the current state.
+fn set_enabled(hwnd: HWND, id: i32, enabled: bool) {
+    // SAFETY: `WM_ENABLE` reads its state from `wparam` and touches nothing
+    // else on our own child.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+            SendMessageW(ctl, WM_ENABLE, Some(WPARAM(enabled as usize)), None);
+        }
+    }
+}
+
+/// The child id a `WM_COMMAND` carries in the low word of `wparam`.
+fn control_id(wparam: WPARAM) -> i32 {
+    low_word(wparam.0) as i32
+}
+
+// --- settings rows --------------------------------------------------------
+
+/// Create the Settings page's controls, hidden.
+///
+/// They are children of the frame, not of a container, because a container is
+/// another window to own, size and paint for no gain: `WS_CLIPCHILDREN` on the
+/// frame already stops its own repaints reaching them, and the hiding below is
+/// what keeps them off the other four pages.
+///
+/// Every one of them is created with `WS_VISIBLE` **absent** and shown only
+/// when `SETTINGS` is the page. A control created visible would flash over
+/// `Overview` for the first frame.
+fn create_settings(parent: HWND, state: &mut UiState) {
+    // The `BS_`/`ES_` flags are plain `i32` in the bindings while `WS_*` are a
+    // newtype, hence the mixed casts — same as the sidebar's.
+    let check_style = WINDOW_STYLE(WS_CHILD.0 | (BS_AUTOCHECKBOX as u32) | WS_TABSTOP.0);
+    for (i, id) in TILE_IDS.iter().enumerate() {
+        create_control(parent, state, w!("BUTTON"), TILE_LABELS[i], check_style, *id);
+    }
+
+    // `ES_LEFT` is 0 in the bindings, so it is not spelled out here.
+    let edit_style = WINDOW_STYLE(WS_CHILD.0 | WS_BORDER.0 | (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0);
+    // The quota is a decimal, the rest are whole numbers. `ES_NUMBER` rejects
+    // the keystroke rather than the value, which is the right behaviour for a
+    // field a user is typing into.
+    let num_style = WINDOW_STYLE(edit_style.0 | ES_NUMBER as u32);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_BG);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_FG);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_ALERT);
+    create_control(parent, state, w!("EDIT"), "", num_style, SET_INTERVAL);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_QUOTA);
+    create_control(parent, state, w!("EDIT"), "", num_style, SET_FONT);
+    create_control(parent, state, w!("EDIT"), "", num_style, SET_OPACITY);
+
+    create_control(parent, state, w!("BUTTON"), "enable", check_style, SET_QUOTA_ON);
+    let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
+    create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
+    create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
+
+    write_form(parent, &state.cfg);
+}
+
+/// One child control, hidden until its page is showing.
+fn create_control(
+    parent: HWND,
+    state: &UiState,
+    class: PCWSTR,
+    text: &str,
+    style: WINDOW_STYLE,
+    id: i32,
+) {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `parent` is our own window and `class`/`wide` outlive the call.
+    unsafe {
+        let _ = CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            PCWSTR(wide.as_ptr()),
+            style,
+            0,
+            0,
+            0,
+            0,
+            Some(parent),
+            Some(HMENU(id as *mut core::ffi::c_void)),
+            Some(state.instance),
+            None,
+        );
+    }
+}
+
+
+/// Columns the tile checkboxes are laid out in. Two fits the eight tiles into
+/// four rows, which is what keeps the whole page inside the minimum window
+/// height without a scrollbar — and the minimum is a floor people actually
+/// drag the frame to.
+const TILE_COLS: usize = 2;
+/// Gap between the tile columns, and between a caption's field and the value
+/// column beside it.
+const FIELD_GAP: i32 = 10;
+
+/// Rows the whole settings page occupies. The tile grid takes the first four;
+/// every labelled field under it takes one more, and Save takes the last.
+const ROW_REFRESH: usize = 4;
+const ROW_PLAN: usize = 5;
+const ROW_FONT: usize = 6;
+const ROW_BG: usize = 7;
+const ROW_FG: usize = 8;
+const ROW_ALERT: usize = 9;
+const ROW_OPACITY: usize = 10;
+const ROW_SAVE: usize = 11;
+const SET_ROW_COUNT: usize = ROW_SAVE + 1;
+
+/// The Settings page's captions, one per row in paint order, with whatever a
+/// bare number would not say for itself. The four rows the tile grid occupies
+/// have no caption of their own — a checkbox carries its own label — so they
+/// are empty strings rather than a shorter array with an offset to get wrong.
+///
+/// This is the page's own extension point, the way `page_rows` is for the
+/// metric pages: `page_rows` returns nothing here because the page has no
+/// metric on it, and every line a user reads is declared in this array.
+const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
+    "",
+    "",
+    "",
+    "",
+    "Refresh   ms",
+    "Monthly plan   GB",
+    "Font size   px",
+    "Background   #RRGGBB",
+    "Foreground   #RRGGBB",
+    "Alert   #RRGGBB",
+    "Opacity   0-255",
+    "Write config.json",
+];
+
+/// Which row each non-tile control belongs on. One table drives both the layout
+/// and the captions, so a control cannot end up under the wrong line.
+const FIELD_ROWS: [(i32, usize); 10] = [
+    (SET_INTERVAL, ROW_REFRESH),
+    (SET_QUOTA_ON, ROW_PLAN),
+    (SET_QUOTA, ROW_PLAN),
+    (SET_FONT, ROW_FONT),
+    (SET_BG, ROW_BG),
+    (SET_FG, ROW_FG),
+    (SET_ALERT, ROW_ALERT),
+    (SET_OPACITY, ROW_OPACITY),
+    (SET_SAVE, ROW_SAVE),
+    (SET_RESET, ROW_SAVE),
+];
+
+/// The controls that sit in the value column rather than at the field's own
+/// left edge — a second control sharing a row with the first. Save and Reload
+/// are the pair; the plan's switch and number are the other.
+fn right_hand_control(id: i32) -> bool {
+    matches!(id, SET_RESET | SET_QUOTA)
+}
+
+/// Which grid slot a tile's checkbox takes: the row under row 0, and the
+/// column within the field. Pure, so the packing can be checked without a
+/// window — eight tiles in two columns is four rows only if this agrees.
+fn tile_slot(index: usize) -> (usize, usize) {
+    (index / TILE_COLS, index % TILE_COLS)
+}
+
+/// Where a tile checkbox sits: the left and right edges of column `col` inside
+/// a field `x0..x1` wide, with `gap` already scaled.
+fn tile_column(col: usize, x0: i32, x1: i32, gap: i32) -> (i32, i32) {
+    let span = ((x1 - x0) - gap * (TILE_COLS as i32 - 1)) / TILE_COLS as i32;
+    let left = x0 + (span + gap) * col as i32;
+    (left, left + span)
+}
 
 /// Metrics in 96-DPI pixels. The font and the sidebar width carry the scaling;
 /// these are the ratios everything else is laid out from.
@@ -100,8 +597,25 @@ struct UiState {
     /// The sidebar's face, held because `WM_CTLCOLORLISTBOX` has to hand the
     /// same brush back on every one of the list's paints.
     side_brush: HBRUSH,
+    /// The content face, for the same reason: the settings page's checkboxes
+    /// and edit fields ask their parent for a background brush on every paint
+    /// of their own, and a control that is handed the wrong one shows a grey
+    /// plate on a themed page.
+    face_brush: HBRUSH,
     /// Our own module, for creating the child window.
     instance: HINSTANCE,
+    /// What the Settings page was last loaded with. Held for the same reason
+    /// the controls' values are not mirrored per keystroke: this is the
+    /// comparison "did the user change anything", and it is only rebuilt at
+    /// load and after a write.
+    settings: SettingsForm,
+    /// Nothing in the page is live until Save runs, so the page has to say so.
+    /// A notice under the button is the whole feedback channel — a dialog would
+    /// be a second window to own for one line of text.
+    notice: Option<String>,
+    /// Set when a save has replaced `cfg` and the tray has not been told yet.
+    /// `update` clears it as it hands the config over. See `save_settings`.
+    handed_back: bool,
 }
 
 /// Show the window, creating it the first time. `existing` is the caller's
@@ -125,7 +639,11 @@ pub fn ensure(instance: HINSTANCE, cfg: &Config, hint: &TrayModel, existing: HWN
         // Owned by the window from here, same as the fonts: `WM_NCDESTROY`
         // deletes it.
         side_brush: unsafe { CreateSolidBrush(shade(bg, 18)) },
+        face_brush: unsafe { CreateSolidBrush(bg) },
         instance,
+        settings: SettingsForm::from_config(cfg),
+        notice: None,
+        handed_back: false,
     });
     // Handed to the window, which owns it from here: `WM_NCDESTROY` turns this
     // back into a `Box` and drops it. Freeing it here instead would leave
@@ -200,23 +718,41 @@ pub fn show(hwnd: HWND) {
 
 /// Hand the window the newest sample and repaint it. A no-op when the window
 /// is not up, so the tray can call it unconditionally once per tick.
-pub fn update(hwnd: HWND, model: &TrayModel) {
+///
+/// Returns a config to adopt instead of the one the tray is running with, and
+/// only ever once per edit. The Settings page has to reach a renderer that
+/// lives on the tray window, and the telemetry thread cannot do it: it is
+/// neither the window's thread nor the edit's author. So the page writes what
+/// it can — its own copy — and returns the difference here, on the one call
+/// that already runs on the right thread with both windows in hand. See
+/// `save_settings`.
+pub fn update(hwnd: HWND, model: &TrayModel) -> Option<Config> {
     if hwnd.is_invalid() {
-        return;
+        return None;
     }
     // SAFETY: same thread as the window, so the state pointer cannot race
     // anyone. `IsWindow` covers a handle that has been torn down.
     unsafe {
         if !IsWindow(Some(hwnd)).as_bool() {
-            return;
+            return None;
         }
         let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut UiState;
         if state.is_null() {
-            return;
+            return None;
         }
         (*state).model = model.clone();
         // The content area only: the sidebar does not change with a sample.
         let _ = InvalidateRect(Some(hwnd), None, false);
+
+        let s = &mut *state;
+        // `take`, not a clone-and-clear: an early return between the two would
+        // hand the same edit back on every tick, and the tray repaint that
+        // follows is what makes a font or colour change visible at all.
+        if s.handed_back {
+            s.handed_back = false;
+            return Some(s.cfg.clone());
+        }
+        None
     }
 }
 
@@ -265,6 +801,11 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
         DATA => {
             push("Today", &model.usage_text);
         }
+        // The Settings page has no metric on it: every line it shows is a
+        // caption from `SET_ROW_LABELS` beside a control. Without this arm it
+        // would fall through to the overview below and paint the traffic
+        // figures in the gaps between its own fields.
+        SETTINGS => {}
         // OVERVIEW, and the fallback for an index that cannot happen: showing
         // the traffic is always better than showing nothing.
         _ => {
@@ -280,7 +821,7 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
 
 /// Whether a page has anything for the sparkline to say. The traffic history
 /// belongs with the traffic figures, and the daily total is the same story at
-/// a coarser grain — the hardware pages have no history to draw.
+/// a coarser grain — the hardware and settings pages have no history to draw.
 fn page_shows_graph(page: usize) -> bool {
     matches!(page, OVERVIEW | DATA)
 }
@@ -331,6 +872,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if !state.is_null() {
                     let s = &mut *state;
                     create_sidebar(hwnd, s);
+                    create_settings(hwnd, s);
                     layout(hwnd, s);
                 }
                 LRESULT(0)
@@ -343,24 +885,71 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
 
-            // The list tells us when the user picks a page. `LB_SETCURSEL` —
-            // how the initial page is chosen — does not raise this, so there
-            // is no risk of the two paths fighting.
+            // Both the page list and the Settings page's own controls arrive
+            // here. The list is dispatched on its id and its notification; the
+            // settings controls have no notification worth filtering on, so
+            // their id alone is the test.
             WM_COMMAND => {
-                if !state.is_null()
-                    && low_word(wparam.0) as i32 == LIST_ID
-                    && high_word(wparam.0) as u32 == LBN_SELCHANGE
-                {
+                if !state.is_null() {
                     let s = &mut *state;
-                    if !s.list.is_invalid() {
-                        let picked = SendMessageW(s.list, LB_GETCURSEL, None, None).0 as i32;
-                        if picked != LB_ERR && picked >= 0 {
-                            s.page = picked as usize;
-                            let _ = InvalidateRect(Some(hwnd), None, false);
+                    let id = control_id(wparam);
+                    if id == LIST_ID && high_word(wparam.0) as u32 == LBN_SELCHANGE {
+                        if !s.list.is_invalid() {
+                            let picked = SendMessageW(s.list, LB_GETCURSEL, None, None).0 as i32;
+                            if picked != LB_ERR && picked >= 0 {
+                                s.page = picked as usize;
+                                // The controls belong to one page and are
+                                // clipped to their own rects, not to the page
+                                // they are on: leaving them up would paint
+                                // eight checkboxes over the sparkline.
+                                show_settings(hwnd, s.page == SETTINGS);
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                            }
                         }
+                    } else if id == SET_QUOTA_ON {
+                        // Disabled rather than silently ignored: with the
+                        // switch off the number has no meaning, and leaving it
+                        // editable would suggest it does.
+                        set_enabled(hwnd, SET_QUOTA, is_checked(hwnd, SET_QUOTA_ON));
+                        s.notice = None;
+                    } else if id == SET_SAVE {
+                        let notice = save_settings(hwnd, s);
+                        s.notice = Some(notice);
+                        // The notice is painted by us, so nothing repaints it
+                        // on its own — and a save that changed the theme has
+                        // to show its own result here too.
+                        repaint_after_settings(hwnd, s);
+                    } else if id == SET_RESET {
+                        // Back to what is on disk — not to the built-in
+                        // defaults, and not to whatever is running. The file is
+                        // the thing the user can see and edit; a reset button
+                        // that invented a third state would be a trap.
+                        let loaded = Config::load();
+                        s.settings = SettingsForm::from_config(&loaded);
+                        s.cfg = loaded.clone();
+                        write_form(hwnd, &loaded);
+                        s.notice = Some(format!("reloaded {}", Config::path().display()));
+                        repaint_after_settings(hwnd, s);
                     }
                 }
                 LRESULT(0)
+            }
+
+            // The settings controls are system controls and would paint
+            // themselves in the system's grey-on-white. Hand them the theme's
+            // own face and text instead. `WM_CTLCOLORBTN` is only honoured by
+            // checkboxes and not by push buttons — Windows draws a push button
+            // from its own parts and ignores the brush, which is why Save keeps
+            // its native look and the checkboxes do not.
+            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
+                if !state.is_null() {
+                    let s = &*state;
+                    let dc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
+                    let _ = SetBkColor(dc, background(&s.cfg));
+                    let _ = SetTextColor(dc, foreground(&s.cfg));
+                    return LRESULT(s.face_brush.0 as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
 
             // The list is a system control and would paint itself grey with a
@@ -397,14 +986,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if !state.is_null() {
                     let dpi = (wparam.0 & 0xFFFF) as u32;
                     let s = &mut *state;
-                    for font in [&mut s.font, &mut s.bold, &mut s.title] {
-                        let _ = DeleteObject(HGDIOBJ(font.0));
-                    }
                     s.dpi = if dpi == 0 { 96 } else { dpi };
-                    s.font = create_font(&s.cfg, s.dpi, 0, false);
-                    s.bold = create_font(&s.cfg, s.dpi, 1, true);
-                    s.title = create_font(&s.cfg, s.dpi, TITLE_EXTRA, true);
-                    // The list has its own font, so it has to be told too.
+                    // Every face and both brushes are built from the DPI and
+                    // the theme, and both moved. The controls are given the new
+                    // font by `layout`.
+                    rebuild_fonts(s);
                     layout(hwnd, s);
 
                     let suggested = lparam.0 as *const RECT;
@@ -451,6 +1037,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let _ = DeleteObject(HGDIOBJ(s.bold.0));
                     let _ = DeleteObject(HGDIOBJ(s.title.0));
                     let _ = DeleteObject(HGDIOBJ(s.side_brush.0));
+                    let _ = DeleteObject(HGDIOBJ(s.face_brush.0));
                 }
                 LRESULT(0)
             }
@@ -547,6 +1134,199 @@ fn layout(hwnd: HWND, state: &mut UiState) {
             Some(LPARAM(1)),
         );
     }
+    layout_settings(hwnd, state);
+}
+
+/// Put the settings controls on the rows `SET_ROW_LABELS` names, and give them
+/// the window's font so they match the painted text beside them.
+///
+/// The controls are laid out even while hidden: they are hidden with
+/// `SW_HIDE`, which leaves a control's rectangle alone, so the next time the
+/// page is shown it is already correct — including after a resize or a DPI
+/// change that happened while it was off screen.
+fn layout_settings(hwnd: HWND, state: &mut UiState) {
+    // SAFETY: `hwnd` is our own window and every handle below is one of our own
+    // children, looked up by id.
+    unsafe {
+        let mut rect = RECT::default();
+        if GetClientRect(hwnd, &mut rect).is_err() {
+            return;
+        }
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+
+        let pad = scale(PAD, state.dpi);
+        let side = sidebar_w(state.dpi);
+        let x0 = if state.list.is_invalid() { pad } else { side + pad };
+        let x1 = w - pad;
+        if x1 <= x0 {
+            return;
+        }
+        let row_h = scale(ROW_H, state.dpi);
+        let ctl_h = scale(CTL_H, state.dpi);
+        let nudge = scale(CTL_NUDGE, state.dpi);
+        // The first row of controls sits one title-height below the page
+        // heading, exactly where `paint` puts its first row — so the labels and
+        // the controls that belong to them share a band.
+        let top = pad + scale(ROW_H + TITLE_EXTRA * 2, state.dpi) + scale(VALUE_OFFSET, state.dpi);
+        let _ = h;
+
+        let field_w = scale(FIELD_W, state.dpi);
+        let gap = scale(FIELD_GAP, state.dpi);
+
+        for (i, id) in TILE_IDS.iter().enumerate() {
+            let (row, col) = tile_slot(i);
+            let (left, right) = tile_column(col, x0, x1, gap);
+            place(hwnd, *id, left, top + row_h * row as i32 + nudge, right - left, ctl_h);
+        }
+
+        for (id, row) in FIELD_ROWS {
+            let y = top + row_h * row as i32 + nudge;
+            // The two right-hand controls share their row with the field that
+            // owns it: the plan's switch says whether the number beside it means
+            // anything, and Reload sits next to the Save it undoes.
+            let (left, width) = if right_hand_control(id) {
+                (x0 + field_w + gap, field_w)
+            } else {
+                (x0, field_w)
+            };
+            place(hwnd, id, left, y, width, ctl_h);
+        }
+
+        for id in control_ids() {
+            if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+                SendMessageW(
+                    ctl,
+                    WM_SETFONT,
+                    Some(WPARAM(state.font.0 as usize)),
+                    Some(LPARAM(1)),
+                );
+            }
+        }
+    }
+}
+
+/// Every control id the Settings page owns, in creation order.
+fn control_ids() -> Vec<i32> {
+    let mut ids: Vec<i32> = TILE_IDS.to_vec();
+    ids.extend(FIELD_ROWS.iter().map(|(id, _)| *id));
+    ids
+}
+
+/// Move one control into place. `SWP_SHOWWINDOW` is deliberately absent: which
+/// page is showing is `show_settings`'s business, not the layout's.
+fn place(hwnd: HWND, id: i32, x: i32, y: i32, w: i32, h: i32) {
+    // SAFETY: `set_enabled`-style lookup of one of our own children; the call
+    // only moves that child.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+            let _ = SetWindowPos(ctl, None, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// Show or hide the whole Settings page. Called when the page changes: the
+/// controls are clipped to their own rectangles by `WS_CLIPCHILDREN`, not to
+/// the page they belong to, so leaving them up would paint eight checkboxes
+/// over the sparkline on every other page.
+fn show_settings(hwnd: HWND, visible: bool) {
+    let flag = if visible { SW_SHOW } else { SW_HIDE };
+    // SAFETY: every id names one of our own children; `ShowWindow` on a child
+    // only changes its visibility.
+    unsafe {
+        for id in control_ids() {
+            if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
+                let _ = ShowWindow(ctl, flag);
+            }
+        }
+    }
+}
+
+/// Write the form to disk, then arrange for the tray to pick the change up.
+///
+/// Three things have to happen and only the first can happen here. The file is
+/// written and its failure reported. The page's own `cfg` is replaced, so the
+/// page itself shows the new theme immediately and `update` has something to
+/// hand back. The tray — a different window on the same thread, reachable only
+/// from its own `WndProc` — takes the new config the next time it feeds this
+/// window a sample, which is what `handed_back` sets up.
+///
+/// Returns the line to show under the button. It reports what happened rather
+/// than what was attempted: a write that failed says so, and nothing claims the
+/// taskbar changed when it did not.
+fn save_settings(hwnd: HWND, state: &mut UiState) -> String {
+    let form = read_form(hwnd);
+    let cfg = match form.into_config(&state.cfg) {
+        Ok(cfg) => cfg,
+        // Nothing is written and nothing is applied: the page keeps the values
+        // the user typed so they can fix the one that was refused.
+        Err(problem) => return problem,
+    };
+
+    // The file first. A config that cannot reach disk is still handed to the
+    // tray below — the edit works for this session and the notice says the
+    // write failed, which is the truth. The alternative, refusing the change
+    // outright, would tell the user their settings did not apply when they did.
+    let written = cfg.save();
+    state.settings = form;
+    // The page paints from this copy, so a font or colour edit is visible here
+    // at once. The tray's copy is the same config, handed over by `update`.
+    state.cfg = cfg;
+    state.handed_back = true;
+
+    match written {
+        Ok(()) => format!("saved to {}", Config::path().display()),
+        Err(e) => format!(
+            "applied, but could not write {}: {e}",
+            Config::path().display()
+        ),
+    }
+}
+
+/// Repaint the settings page after something it drew changed — a new notice, or
+/// a theme colour that moved.
+///
+/// The fonts the window draws with belong to `UiState`, not to the controls, so
+/// a font-size edit has to rebuild all three before the captions and heading
+/// match the controls beside them. The list gets the new face too.
+fn repaint_after_settings(hwnd: HWND, state: &mut UiState) {
+    rebuild_fonts(state);
+    // SAFETY: `hwnd` is our own live window.
+    unsafe {
+        layout(hwnd, state);
+        let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
+/// Delete and rebuild the three faces from the current config and DPI. Shared
+/// by the DPI change and the settings save, because both are "the font's inputs
+/// moved" and getting one of the two paths wrong leaves stale text.
+fn rebuild_fonts(state: &mut UiState) {
+    // SAFETY: all three fonts are ours and are not selected into any DC between
+    // paints.
+    unsafe {
+        for font in [&mut state.font, &mut state.bold, &mut state.title] {
+            let _ = DeleteObject(HGDIOBJ(font.0));
+        }
+    }
+    state.font = create_font(&state.cfg, state.dpi, 0, false);
+    state.bold = create_font(&state.cfg, state.dpi, 1, true);
+    state.title = create_font(&state.cfg, state.dpi, TITLE_EXTRA, true);
+
+    // The brushes are the theme too: a background edit has to move them or the
+    // sidebar and the controls keep the old face until the next launch.
+    let bg = background(&state.cfg);
+    // SAFETY: both brushes are ours; the window holds them in `UiState` and
+    // replaces them here, so the old ones are no longer referenced.
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(state.side_brush.0));
+        let _ = DeleteObject(HGDIOBJ(state.face_brush.0));
+        state.side_brush = CreateSolidBrush(shade(bg, 18));
+        state.face_brush = CreateSolidBrush(bg);
+    }
 }
 
 /// Draw the content area: background, heading, rows, sparkline.
@@ -621,6 +1401,40 @@ fn paint(hwnd: HWND, state: &UiState) {
             draw(dc, state.font, label, x0, y, x1, DT_LEFT);
             draw(dc, state.bold, value, x0, y, x1, DT_RIGHT);
             y += row_h;
+        }
+
+        // The Settings page's captions. They sit on the same bands as the
+        // controls `layout_settings` places, from the same constants, so a row
+        // and its caption cannot drift even though two functions draw them.
+        if page == SETTINGS {
+            let font = state.font;
+            for (row, label) in SET_ROW_LABELS.iter().enumerate() {
+                if label.is_empty() {
+                    continue;
+                }
+                draw(dc, font, label, x0, y + row_h * row as i32, x1, DT_LEFT);
+            }
+            // The notice sits under the buttons rather than beside them: it is
+            // the result of the whole page, not of either button, and it needs
+            // the full width to name a path that did not write.
+            if let Some(notice) = &state.notice {
+                let colour = if notice.starts_with("saved") {
+                    fg
+                } else {
+                    parse_color(&state.cfg.theme.alert).unwrap_or(fg_default())
+                };
+                SetTextColor(dc, colour);
+                draw(
+                    dc,
+                    state.font,
+                    notice,
+                    x0,
+                    y + row_h * (SET_ROW_COUNT as i32 + 1),
+                    x1,
+                    DT_LEFT,
+                );
+                SetTextColor(dc, fg);
+            }
         }
 
         // The sparkline fills whatever room is left, so the picture grows with
@@ -701,6 +1515,14 @@ fn fg_default() -> COLORREF {
     COLORREF(0x00E6_E6E6)
 }
 
+/// The theme's foreground, or a readable stand-in. Undoes the pair of
+/// `unwrap_or` fallbacks that `paint` and the control colours would otherwise
+/// each carry separately, so the page and the controls on it cannot disagree
+/// about what colour the text is.
+fn foreground(cfg: &Config) -> COLORREF {
+    parse_color(&cfg.theme.foreground).unwrap_or(fg_default())
+}
+
 /// Building a row font at `dpi`. `extra` is added to the configured point size
 /// — values lead, headings more so. A failed `CreateFontW` yields a null
 /// `HFONT`, which GDI reads as "the default font" — degraded, not fatal.
@@ -771,6 +1593,218 @@ mod tests {
         }
         assert_eq!(PAGES.first(), Some(&"Overview"), "the first page is the one shown");
         assert!(PAGES.len() > 1, "a one-page sidebar is not a sidebar");
+        // Settings has to be last: `OVERVIEW`..`DATA` are positional, so a page
+        // inserted before them renumbers every page after it.
+        assert_eq!(PAGES.last(), Some(&"Settings"));
+        assert_eq!(SETTINGS, PAGES.len() - 1);
+        for (i, name) in ["Overview", "Network", "System", "Data"].iter().enumerate() {
+            assert_eq!(&PAGES[i], name, "page {i} moved");
+        }
+    }
+
+    #[test]
+    fn the_settings_page_has_no_metric_rows() {
+        // Without its own arm in `page_rows` it would fall through to the
+        // overview and paint traffic figures between its own fields.
+        assert!(page_rows(SETTINGS, &full()).is_empty());
+        assert!(!page_shows_graph(SETTINGS), "settings are not a traffic story");
+    }
+
+    #[test]
+    fn every_settings_caption_has_a_row() {
+        // The painter zips this array against row indices. A short array would
+        // silently drop the last caption — which is the one that names the
+        // button that does the work.
+        assert_eq!(SET_ROW_LABELS.len(), SET_ROW_COUNT);
+        assert_eq!(SET_ROW_LABELS[ROW_SAVE], "Write config.json");
+        // The tile rows carry the checkboxes' own labels, so they are blank.
+        for row in 0..ROW_REFRESH {
+            assert!(SET_ROW_LABELS[row].is_empty(), "row {row} has a caption");
+        }
+    }
+
+    #[test]
+    fn every_field_control_is_laid_out_exactly_once() {
+        // `FIELD_ROWS` drives both the layout and the captions, so a control
+        // missing from it is created and never positioned — an invisible
+        // field — and one listed twice is moved to whichever row won.
+        let mut seen: Vec<i32> = Vec::new();
+        for (id, row) in FIELD_ROWS {
+            assert!(!seen.contains(&id), "control {id} laid out twice");
+            assert!(row < SET_ROW_COUNT, "control {id} is off the page");
+            seen.push(id);
+        }
+        assert_eq!(seen.len(), FIELD_ROWS.len());
+
+        // Nothing may collide with the page list or with a tile checkbox.
+        for id in &seen {
+            assert_ne!(*id, LIST_ID);
+            assert!(!TILE_IDS.contains(id), "control {id} collides with a tile");
+        }
+        // The two Save/Reload buttons are both on the last row.
+        assert!(seen.contains(&SET_SAVE));
+        assert!(seen.contains(&SET_RESET));
+    }
+
+    #[test]
+    fn the_tile_ids_are_contiguous_and_theirs_alone() {
+        // The grid is built by iterating these in order, so a duplicate would
+        // put two checkboxes on one config field.
+        for (i, id) in TILE_IDS.iter().enumerate() {
+            assert_eq!(*id, SET_ID_BASE + i as i32);
+        }
+        assert_eq!(TILE_IDS.len(), TILE_LABELS.len());
+        // No field id may be one of the tile ids.
+        for (id, _) in FIELD_ROWS {
+            for tile in TILE_IDS {
+                assert_ne!(id, tile, "field {id} shares an id with a tile");
+            }
+        }
+    }
+
+    #[test]
+    fn the_tiles_pack_into_four_rows_of_two() {
+        // Eight tiles in two columns is four rows only if the packing agrees,
+        // and `create_settings` gives `TILE_LABELS[i]` the id at slot `i`.
+        let slots: Vec<(usize, usize)> = (0..TILE_IDS.len()).map(tile_slot).collect();
+        assert_eq!(slots[0], (0, 0));
+        assert_eq!(slots[1], (0, 1));
+        assert_eq!(slots[2], (1, 0));
+        assert_eq!(slots[TILE_IDS.len() - 1], (3, 1));
+        // No two tiles may land on the same slot.
+        let mut unique = slots.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), slots.len());
+        // And the grid must end before the first labelled field starts.
+        let last_row = slots.iter().map(|(r, _)| *r).max().unwrap();
+        assert!(last_row < ROW_REFRESH, "the grid overlaps the fields below it");
+    }
+
+    #[test]
+    fn the_two_tile_columns_do_not_overlap() {
+        let (left0, right0) = tile_column(0, 200, 700, 10);
+        let (left1, right1) = tile_column(1, 200, 700, 10);
+        assert_eq!(left0, 200, "the first column starts at the field edge");
+        assert!(right0 < left1, "columns overlap: {right0} >= {left1}");
+        assert_eq!(right1, 700, "the last column ends at the field edge");
+        // Equal widths, or the two columns look like a mistake.
+        assert_eq!(right0 - left0, right1 - left1);
+    }
+
+    #[test]
+    fn the_tiles_map_to_the_show_flags_and_back() {
+        // `tile_flags` and `apply_tiles` are the only place the eight `Show`
+        // fields are named as a list, so a round trip is what proves the page
+        // shows and writes the same field.
+        let mut show = crate::config::Show::default();
+        // Flip every one, so a field wired to the wrong slot shows up.
+        let flipped: [bool; 8] = std::array::from_fn(|i| i % 2 == 0);
+        apply_tiles(&mut show, &flipped);
+        assert_eq!(tile_flags(&show), flipped);
+
+        let back = crate::config::Show::default();
+        assert_eq!(tile_flags(&back), [true, true, true, true, true, false, false, true]);
+    }
+
+    #[test]
+    fn a_config_round_trips_through_the_form() {
+        // Load the page, save it without touching anything: the file must come
+        // back byte-identical. This is the property that makes the page safe to
+        // open and close.
+        let cfg = Config::default();
+        let form = SettingsForm::from_config(&cfg);
+        let back = form.into_config(&cfg).expect("an untouched form must be valid");
+        assert_eq!(back.to_json(), cfg.to_json());
+    }
+
+    #[test]
+    fn the_form_keeps_a_plan_of_zero_switched_off() {
+        // `quota_gb == 0.0` is the config's own "no plan", so the page has to
+        // show it as the switch being off and write it back as zero — not as
+        // the bound it displays in the box.
+        let cfg = Config::default();
+        assert_eq!(cfg.quota_gb, 0.0);
+        let form = SettingsForm::from_config(&cfg);
+        assert!(!form.quota_on);
+        assert_eq!(form.into_config(&cfg).unwrap().quota_gb, 0.0);
+
+        // With a real plan the switch is on and the number survives.
+        let planned = Config {
+            quota_gb: 250.0,
+            ..Default::default()
+        };
+        let form = SettingsForm::from_config(&planned);
+        assert!(form.quota_on);
+        assert_eq!(form.quota, 250.0);
+        assert_eq!(form.into_config(&planned).unwrap().quota_gb, 250.0);
+    }
+
+    #[test]
+    fn an_impossible_font_size_is_refused_not_rounded() {
+        // Rounding would let a typo become a number the user never typed.
+        let cfg = Config::default();
+        let mut form = SettingsForm::from_config(&cfg);
+        form.font_size = 400;
+        assert!(form.into_config(&cfg).is_err());
+        // `-1` is what an unparseable box reads back as.
+        form.font_size = -1;
+        assert!(form.into_config(&cfg).is_err());
+        // The two bounds themselves are fine.
+        for ok in [9, 72] {
+            form.font_size = ok;
+            assert_eq!(form.into_config(&cfg).unwrap().theme.font_size, ok as u32);
+        }
+    }
+
+    #[test]
+    fn a_quota_switched_on_without_a_number_is_refused() {
+        let cfg = Config::default();
+        let mut form = SettingsForm::from_config(&cfg);
+        form.quota_on = true;
+        // `NaN` is what an empty or unparseable box reads back as.
+        form.quota = f64::NAN;
+        assert!(form.into_config(&cfg).is_err());
+        form.quota = 0.0;
+        assert!(form.into_config(&cfg).is_err(), "zero is not a plan");
+        form.quota = -5.0;
+        assert!(form.into_config(&cfg).is_err());
+        form.quota = 20.0;
+        assert_eq!(form.into_config(&cfg).unwrap().quota_gb, 20.0);
+    }
+
+    #[test]
+    fn the_refresh_period_is_clamped_rather_than_refused() {
+        // A rate is a bound, not a preference: a 5 ms refresh is a request for
+        // a busy loop, and it becomes the floor instead of an error.
+        let cfg = Config::default();
+        let mut form = SettingsForm::from_config(&cfg);
+        form.interval = 5;
+        assert_eq!(form.into_config(&cfg).unwrap().interval_ms, 100);
+        form.interval = 999_999;
+        assert_eq!(form.into_config(&cfg).unwrap().interval_ms, 10_000);
+        form.interval = 2000;
+        assert_eq!(form.into_config(&cfg).unwrap().interval_ms, 2000);
+    }
+
+    #[test]
+    fn the_quota_box_drops_a_pointless_decimal() {
+        assert_eq!(format_quota(20.0), "20");
+        assert_eq!(format_quota(20.5), "20.5");
+        assert_eq!(format_quota(QUOTA_MIN_GB), "0.5");
+    }
+
+    #[test]
+    fn unparseable_field_text_is_not_a_zero() {
+        // The difference matters: `0` is a value the page would save, and an
+        // empty box is not.
+        assert_eq!(parse_int(None), None);
+        assert_eq!(parse_int(Some("")), None);
+        assert_eq!(parse_int(Some("abc")), None);
+        assert_eq!(parse_int(Some(" 12 ")), Some(12));
+        assert_eq!(parse_f64(Some("")), None);
+        assert_eq!(parse_f64(Some("1.5")), Some(1.5));
+        assert_eq!(parse_int(Some("1.5")), None, "a size is whole");
     }
 
     #[test]
