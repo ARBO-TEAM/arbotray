@@ -45,8 +45,15 @@ pub(crate) const MIN_W: i32 = 660;
 pub(crate) const MIN_H: i32 = 320;
 
 /// Initial size: room for the rows plus a decent sparkline.
+///
+/// `START_H` tracks the Settings page's row count — the tallest page, since it
+/// is the one that grows a band per setting. The last band starts at
+/// `form_top(96) + ROW_H * ROW_SAVE` = 440, so the floor is that plus a whole
+/// row of margin; a page that grows a row without this moving would open with
+/// its last field under the frame's edge, and nothing in the layout would
+/// complain.
 pub(crate) const START_W: i32 = 720;
-pub(crate) const START_H: i32 = 460;
+pub(crate) const START_H: i32 = 490;
 
 /// Put the Settings controls where they belong. Called on every resize, which
 /// is also what keeps them correct across a DPI change.

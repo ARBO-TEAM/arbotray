@@ -62,6 +62,16 @@ pub(crate) const SET_STOP: i32 = SET_ID_BASE + 19;
 pub(crate) const SET_WATCH: i32 = SET_ID_BASE + 20;
 pub(crate) const SET_WATCH_RESET: i32 = SET_ID_BASE + 21;
 
+/// The Settings page's start-with-Windows checkbox.
+///
+/// It shares the Settings numbering like everything else, but it is the one
+/// control on the page whose state is **not** in `config.json`: it reads and
+/// writes the per-user `Run` key, which is the only thing Windows consults. A
+/// config field mirroring it could disagree with the registry — after
+/// `install.ps1 -Autostart`, a Task Manager disable, or a hand edit — and the
+/// checkbox would then report a state that is not the one in force.
+pub(crate) const SET_AUTOSTART: i32 = SET_ID_BASE + 22;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings

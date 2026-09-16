@@ -468,6 +468,30 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         // editable would suggest it does.
                         set_enabled(hwnd, SET_QUOTA, is_checked(hwnd, SET_QUOTA_ON));
                         s.notice = None;
+                    } else if id == SET_AUTOSTART {
+                        // Written on the click rather than staged for Save,
+                        // because it is the one control on the page that does
+                        // not describe `config.json`: the registry is the
+                        // authority, so there is nothing here to defer.
+                        let want = is_checked(hwnd, SET_AUTOSTART);
+                        if crate::autostart::set(want) {
+                            // Worded to start with `saved` so it paints as a
+                            // result rather than as a failure — that prefix is
+                            // the whole success/failure signal the notice line
+                            // has, see `paint::settings`.
+                            s.notice = Some(if want {
+                                "saved: starts with Windows".into()
+                            } else {
+                                "saved: no longer starts with Windows".into()
+                            });
+                        } else {
+                            // Put the tick back. A checkbox left showing a
+                            // state the registry did not accept is a lie about
+                            // what will happen at logon.
+                            set_check(hwnd, SET_AUTOSTART, !want);
+                            s.notice = Some("could not change the startup entry".into());
+                        }
+                        repaint_after_settings(hwnd, s);
                     } else if id == SET_SAVE {
                         let notice = save_settings(hwnd, s);
                         s.notice = Some(notice);

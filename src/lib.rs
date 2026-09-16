@@ -4,6 +4,7 @@
 //! taskbar, `config` persists user settings, `app` wires the three together.
 
 pub mod app;
+pub mod autostart;
 pub mod config;
 pub mod taskbar;
 pub mod telemetry;

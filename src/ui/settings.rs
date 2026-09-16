@@ -4,9 +4,9 @@ use crate::config::{
     Config, QUOTA_MAX_GB, QUOTA_MIN_GB, clamp_font_size, clamp_interval_ms, clamp_quota_gb,
 };
 use crate::ui::consts::{
-    BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_BG, SET_FG, SET_FONT, SET_INTERVAL,
-    SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_WATCH,
-    SET_WATCH_RESET, TILE_IDS, TILE_LABELS, WM_ENABLE,
+    BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG, SET_FONT,
+    SET_INTERVAL, SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP,
+    SET_WATCH, SET_WATCH_RESET, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
@@ -201,6 +201,10 @@ pub(crate) fn write_form(hwnd: HWND, cfg: &Config) {
     set_text(hwnd, SET_FG, &form.foreground);
     set_text(hwnd, SET_ALERT, &form.alert);
     set_text(hwnd, SET_OPACITY, &form.opacity.to_string());
+    // Not from `form`: this one is read back from the registry every time the
+    // page is written, because the registry, not the config, is what Windows
+    // consults — see `crate::autostart`.
+    set_check(hwnd, SET_AUTOSTART, crate::autostart::enabled());
     // The quota field is only meaningful while its switch is on.
     set_enabled(hwnd, SET_QUOTA, form.quota_on);
 }
@@ -324,6 +328,10 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     create_control(parent, state, w!("EDIT"), "", num_style, SET_OPACITY);
 
     create_control(parent, state, w!("BUTTON"), "enable", check_style, SET_QUOTA_ON);
+    // Unlabelled on purpose: its painted caption sits on the same band, the way
+    // every text field's does. Giving the checkbox its own text as well would
+    // print the setting twice.
+    create_control(parent, state, w!("BUTTON"), "", check_style, SET_AUTOSTART);
     let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
@@ -393,7 +401,8 @@ pub(crate) const ROW_BG: usize = 7;
 pub(crate) const ROW_FG: usize = 8;
 pub(crate) const ROW_ALERT: usize = 9;
 pub(crate) const ROW_OPACITY: usize = 10;
-pub(crate) const ROW_SAVE: usize = 11;
+pub(crate) const ROW_STARTUP: usize = 11;
+pub(crate) const ROW_SAVE: usize = 12;
 pub(crate) const SET_ROW_COUNT: usize = ROW_SAVE + 1;
 
 /// The Settings page's captions, one per row in paint order, with whatever a
@@ -416,12 +425,13 @@ pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
     "Foreground   #RRGGBB",
     "Alert   #RRGGBB",
     "Opacity   0-255",
+    "Start with Windows",
     "Write config.json",
 ];
 
 /// Which row each non-tile control belongs on. One table drives both the layout
 /// and the captions, so a control cannot end up under the wrong line.
-pub(crate) const FIELD_ROWS: [(i32, usize); 10] = [
+pub(crate) const FIELD_ROWS: [(i32, usize); 11] = [
     (SET_INTERVAL, ROW_REFRESH),
     (SET_QUOTA_ON, ROW_PLAN),
     (SET_QUOTA, ROW_PLAN),
@@ -430,6 +440,7 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 10] = [
     (SET_FG, ROW_FG),
     (SET_ALERT, ROW_ALERT),
     (SET_OPACITY, ROW_OPACITY),
+    (SET_AUTOSTART, ROW_STARTUP),
     (SET_SAVE, ROW_SAVE),
     (SET_RESET, ROW_SAVE),
 ];
