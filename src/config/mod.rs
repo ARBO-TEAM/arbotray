@@ -35,7 +35,21 @@ pub const DEFAULT_JSON: &str = r##"{
   "retention": {
     "days": 7
   },
-  "quota_gb": 0.0
+  "quota_gb": 0.0,
+  "widget": {
+    "enabled": false,
+    "show": {
+      "net": true,
+      "latency": true,
+      "hardware": true,
+      "network": true,
+      "usage": true,
+      "system": true
+    },
+    "x": null,
+    "y": null,
+    "always_on_top": true
+  }
 }"##;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +63,82 @@ pub struct Config {
     /// Monthly data allowance in GB. `0` means "no plan", which hides the
     /// percentage and the warning colour entirely.
     pub quota_gb: f64,
+    /// The desktop widget — the floating panel for the readings the taskbar
+    /// strip has no room for. Off by default: this is the one thing the app
+    /// draws that is not inside a surface Windows already owns, so it is opted
+    /// into rather than started with.
+    pub widget: Widget,
+}
+
+/// The desktop widget's own settings.
+///
+/// A section of its own rather than more `show` flags, because the strip's
+/// eight are one design with everything in it, while these six are another:
+/// the whole point of the widget is that a reading either does not fit the
+/// taskbar or is wanted bigger, and mixing the two sets into one `show` block
+/// would leave no way to tell which surface a `false` was about.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Widget {
+    pub enabled: bool,
+    pub show: WidgetShow,
+    /// Remembered top-left corner, in screen pixels. `None` until the window
+    /// has been placed once, which is also how a first run knows to pick a
+    /// corner of the work area rather than trusting a position it never had.
+    ///
+    /// `f64` rather than `i32` because this is JSON read back from a file
+    /// somebody can edit, and the bounds are enforced in `clamp_x`/`clamp_y`
+    /// where the work area is known — not here, where there is no screen.
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    /// Keep the panel above other windows. Off means an ordinary window that
+    /// goes behind whatever is clicked next.
+    pub always_on_top: bool,
+}
+
+/// Which blocks the widget draws. Coarser than `Show`: a panel big enough to
+/// hold labelled rows does not want eight independent switches for them, so
+/// these group the rows the way the pages already do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetShow {
+    /// Download and upload rate.
+    pub net: bool,
+    /// Gateway and internet round-trip.
+    pub latency: bool,
+    /// CPU, RAM, GPU, battery.
+    pub hardware: bool,
+    /// Adapter, address, gateway, DNS, Wi-Fi.
+    pub network: bool,
+    /// Today, this month, and the last few days.
+    pub usage: bool,
+    /// Machine name, Windows build, CPU model, disks, uptime.
+    pub system: bool,
+}
+
+impl Default for Widget {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            show: WidgetShow::default(),
+            x: None,
+            y: None,
+            always_on_top: true,
+        }
+    }
+}
+
+impl Default for WidgetShow {
+    fn default() -> Self {
+        Self {
+            net: true,
+            latency: true,
+            hardware: true,
+            network: true,
+            usage: true,
+            system: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +242,7 @@ impl Default for Config {
             theme: Theme::default(),
             retention: Retention::default(),
             quota_gb: 0.0,
+            widget: Widget::default(),
         }
     }
 }
