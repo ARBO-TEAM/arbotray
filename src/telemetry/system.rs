@@ -15,7 +15,7 @@
 //! means "this machine cannot answer that", which the page renders as a row that
 //! is not there — not as a row that says "unknown".
 
-use super::SystemSample;
+use super::{DiskInfo, SystemSample};
 use core::ffi::c_void;
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Graphics::Gdi::{
@@ -30,7 +30,10 @@ use windows::Win32::System::SystemInformation::{
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 use windows::Win32::System::Threading::{ALL_PROCESSOR_GROUPS, GetActiveProcessorCount};
-use windows::Win32::System::WindowsProgramming::GetComputerNameW;
+use windows::Win32::Storage::FileSystem::{
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
+};
+use windows::Win32::System::WindowsProgramming::{DRIVE_FIXED, GetComputerNameW};
 use windows::core::{PCWSTR, PWSTR, w};
 
 /// The two registry keys this machine's identity lives in.
@@ -319,6 +322,62 @@ fn battery() -> (Option<u32>, Option<bool>) {
     (pct, on_ac)
 }
 
+/// The fixed local volumes, in drive-letter order.
+///
+/// Every logical drive is asked what it is and only `DRIVE_FIXED` survives. A
+/// CD tray with nothing in it, a card reader and a mapped network share are all
+/// drives Windows will happily list, and none of them is "the disk this machine
+/// has" — a page that listed them would show rows that come and go with what
+/// happens to be plugged in. A removable drive that *is* present is real
+/// storage, but its presence is the flickering part, so it stays out.
+///
+/// A volume reporting no capacity is dropped as well: `0B free of 0B` is a row
+/// that says nothing, and the mount point it names is usually a stub left by
+/// software the user has since removed.
+fn disks() -> Vec<DiskInfo> {
+    // SAFETY: takes no arguments and cannot fail. A zero return means no
+    // drives, which the loop below turns into an empty list.
+    let mask = unsafe { GetLogicalDrives() };
+    let mut out = Vec::new();
+    for i in 0..26u32 {
+        if mask & (1u32 << i) == 0 {
+            continue;
+        }
+        let letter = char::from(b'A' + i as u8);
+        // `GetDriveTypeW` wants the root, i.e. `C:\`, not a bare letter.
+        let root = [letter as u16, u16::from(b':'), u16::from(b'\\'), 0];
+        // SAFETY: a live, null-terminated root path.
+        if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != DRIVE_FIXED {
+            continue;
+        }
+        let mount = format!("{letter}:");
+        let mut wide: Vec<u16> = mount.encode_utf16().collect();
+        wide.push(0);
+        let (mut total, mut free) = (0u64, 0u64);
+        // SAFETY: a live path and two live out-params. The middle argument is
+        // the free space available to *this* caller, which on a volume with
+        // quotas is not the free space on the disk — the page is reporting the
+        // disk, so it reads the third argument instead.
+        let asked = unsafe {
+            GetDiskFreeSpaceExW(
+                PCWSTR(wide.as_ptr()),
+                None,
+                Some(&mut total),
+                Some(&mut free),
+            )
+        };
+        if asked.is_err() || total == 0 {
+            continue;
+        }
+        out.push(DiskInfo {
+            mount,
+            free_bytes: free,
+            total_bytes: total,
+        });
+    }
+    out
+}
+
 /// How long the machine has been up.
 fn uptime_secs() -> u64 {
     // SAFETY: takes no arguments and cannot fail.
@@ -370,6 +429,7 @@ fn static_detail() -> SystemSample {
         physical_cores: physical_cores(),
         logical_cores: logical_cores(),
         gpus: gpus(),
+        disks: disks(),
         ..Default::default()
     }
 }
@@ -489,6 +549,41 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), names.len(), "the same adapter twice: {names:?}");
+    }
+
+    #[test]
+    fn the_reported_volumes_are_real_ones() {
+        // Runs against the real machine, which is where this can go wrong: the
+        // drive mask is a bitfield, and getting the bit-to-letter mapping
+        // backwards enumerates 26 volumes that do not exist. A free-space call
+        // that is handed the wrong root fails for the drive it names, so the
+        // failure would be silent and the page would simply have no Storage
+        // section.
+        let vols = disks();
+        for d in &vols {
+            assert!(
+                d.mount.len() == 2 && d.mount.ends_with(':'),
+                "not a drive letter: {}",
+                d.mount
+            );
+            assert!(d.total_bytes > 0, "{} reports no capacity", d.mount);
+            assert!(
+                d.free_bytes <= d.total_bytes,
+                "{}: {} free of {}",
+                d.mount,
+                d.free_bytes,
+                d.total_bytes
+            );
+        }
+        // Letters are enumerated in order, and a volume is never listed twice.
+        let mut sorted = vols.iter().map(|d| d.mount.clone()).collect::<Vec<_>>();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), vols.len(), "a volume listed twice: {vols:?}");
+        // Every Windows install running this test has a system volume, so an
+        // empty list means the enumeration is broken rather than that the
+        // machine has no disks.
+        assert!(!vols.is_empty(), "no local volumes found at all");
     }
 }
 

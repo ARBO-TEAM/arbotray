@@ -93,6 +93,15 @@ pub struct TrayModel {
     pub power_text: String,
     /// `3d 4h`, at two units of precision.
     pub uptime_text: String,
+    /// One entry per local volume, as `(mount, "210G free of 931G")`.
+    ///
+    /// A list of label-value pairs rather than one joined string, because a
+    /// drive letter belongs in a row's *label* and its usage in the value — and
+    /// a machine with three volumes joined into one row would be a wall of text
+    /// ellipsised at the first drive. Declared here rather than left in the
+    /// sample because the formatted pair is what the page draws, and formatting
+    /// is what the model is for.
+    pub disks: Vec<(String, String)>,
     /// Recent download throughput, oldest first — the mini-sparkline source.
     pub history: Vec<u64>,
 }
@@ -183,6 +192,20 @@ impl TrayModel {
             None => String::new(),
         };
         out.uptime_text = sys.uptime_secs.map(format_uptime).unwrap_or_default();
+        out.disks = sys
+            .disks
+            .iter()
+            .map(|d| {
+                (
+                    d.mount.clone(),
+                    format!(
+                        "{} free of {}",
+                        crate::telemetry::usage::format_size(d.free_bytes),
+                        crate::telemetry::usage::format_size(d.total_bytes)
+                    ),
+                )
+            })
+            .collect();
 
         if let Some(hw) = &m.hw {
             if cfg.show.cpu {

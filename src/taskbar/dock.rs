@@ -312,6 +312,10 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         battery_text: String::new(),
         power_text: String::new(),
         uptime_text: String::new(),
+        // A list rather than a string, and empty here for the same reason as
+        // the rest: no disk row has a tile, so there is no worst case to reserve
+        // width for.
+        disks: Vec::new(),
         history: if cfg.show.sparkline {
             vec![0; RESERVED_HISTORY]
         } else {

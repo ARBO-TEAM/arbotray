@@ -125,6 +125,24 @@ pub struct SystemSample {
     pub on_ac: Option<bool>,
     /// Seconds since boot.
     pub uptime_secs: Option<u64>,
+    /// Local drives with a capacity worth reporting, in drive-letter order.
+    /// Empty on a machine that will not enumerate any — which is the same
+    /// answer as "none", because a row per drive is what the page draws and
+    /// there is nothing to draw a row for.
+    pub disks: Vec<DiskInfo>,
+}
+
+/// One local volume: where it is mounted and how full it is.
+///
+/// Free and total together, rather than only the percentage: "80% full" reads
+/// as fine on a 4 TB disk and as an emergency on a 64 GB one, so the pair is
+/// the reading and the percentage is a rounding of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskInfo {
+    /// The mount point, e.g. `C:`.
+    pub mount: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
 }
 
 /// One full snapshot of everything the tray can display.
