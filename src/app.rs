@@ -53,6 +53,10 @@ pub fn run() -> i32 {
         return 1;
     }
 
+    // Asked once per launch, off the message loop and off the tick: the answer
+    // is a page line, and nothing about starting or monitoring waits on it.
+    crate::update::check_soon();
+
     let mut tray = tray;
     if let Err(e) = tray.message_loop() {
         eprintln!("arbotray: message loop failed: {e}");

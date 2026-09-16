@@ -3,6 +3,8 @@ name = "arbotray"
 version = "0.7.1"
 edition = "2024"
 description = "Ultra-light native Windows taskbar monitor: network speed, latency, hardware usage"
+license = "MIT"
+repository = "https://github.com/ARBO-TEAM/arbotray"
 
 [dependencies]
 windows = { version = "0.62.2", features = [

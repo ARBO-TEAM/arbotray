@@ -125,6 +125,18 @@ pub struct TrayModel {
     /// ellipsised at the first port.
     pub open_ports: Vec<OpenPort>,
 
+    // --- the System page's build line --------------------------------------
+
+    /// This build's version, and the newer one if an update was found.
+    ///
+    /// Filled by `from_metric` from the running binary rather than from the
+    /// config or a sample: it is a property of the program, not of the machine,
+    /// and it is the same on every tick. The update half is read from
+    /// `crate::update`, which is filled once per launch on its own thread — so
+    /// this line changes from `0.7.1` to `0.7.1 → 0.8.0` at some point after
+    /// startup, and that is the whole notification mechanism.
+    pub version_text: String,
+
     // --- the Speed Test page's detail --------------------------------------
 
     /// What the test is doing: a phase label, or empty when idle.
@@ -173,6 +185,17 @@ impl TrayModel {
     /// Pure function — this is the piece worth testing.
     pub fn from_metric(m: &Metric, cfg: &Config) -> Self {
         let mut out = TrayModel::default();
+
+        // The build line. Unconditional and never gated on a tile: it describes
+        // the program rather than the machine, so it is the one reading that is
+        // always there to be read. The update check runs on its own thread for a
+        // few seconds after startup, so this reads `0.7.1` first and
+        // `0.7.1 \u{2192} 0.8.0` once the answer arrives — and that transition,
+        // once per launch, is the whole notification.
+        out.version_text = match crate::update::available() {
+            Some(newer) => format!("{} \u{2192} {newer}", crate::update::current()),
+            None => crate::update::current().to_string(),
+        };
 
         if let Some(n) = &m.net {
             if cfg.show.net_down {

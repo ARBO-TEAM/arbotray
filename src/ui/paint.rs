@@ -139,6 +139,22 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             }
         }
 
+        // Where to get a newer build, when one was found. The row above it
+        // already says *that* there is one — `0.7.1 → 0.8.0` — so this line is
+        // only the next step, and it is drawn in the accent colour because it is
+        // the one line on this page asking to be acted on. Absent entirely
+        // otherwise: there is no "up to date" line, because a page that says
+        // "you are current" every time you open it is a page that has taught you
+        // to stop reading it.
+        if page == SYSTEM {
+            if let Some(newer) = crate::update::available() {
+                c.note(
+                    &format!("Version {newer} is available \u{2014} {}", crate::update::DOWNLOADS),
+                    pal.accent,
+                );
+            }
+        }
+
         // The Data page's day-by-day breakdown, under the two totals above it.
         // Its rows carry runtime dates rather than the metric pages' fixed
         // captions, which is why they are not in `page_rows`.

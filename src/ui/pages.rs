@@ -79,6 +79,12 @@ pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, St
             push("Uptime", &model.uptime_text);
             push("Battery", &model.battery_text);
             push("Power", &model.power_text);
+            // Last, and always there: this is the row a user reads to find out
+            // which build they are on, and the one an upgrade prompt is checked
+            // against by hand when the automatic check is unavailable. Its value
+            // carries the newer version when one was found, so "you are on 0.7.1"
+            // and "0.8.0 exists" are one line rather than two.
+            push("Version", &model.version_text);
         }
         DATA => {
             push("Today", &model.usage_text);

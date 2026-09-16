@@ -1042,6 +1042,9 @@ mod tests {
             speed_error_text: String::new(),
             speed_when_text: "14:32:07".into(),
             speed_history: vec![("14:32:07".into(), "94.2M/s / 11.8M/s".into())],
+            // The build line, filled so the System page's row ordering is
+            // exercised with its last row present rather than absent.
+            version_text: "0.7.1 \u{2192} 0.8.0".into(),
         }
     }
 
@@ -1394,14 +1397,20 @@ mod tests {
 
     #[test]
     fn the_system_page_leads_with_the_live_metrics() {
-        // The page grew from two rows to ten. The live pair stays at the top
+        // The page grew from two rows to eleven. The live pair stays at the top
         // because it is what moves — everything below it is a reading of
         // something that does not, and burying the moving numbers under the
         // machine's name would make the page's most useful line its hardest to
         // find.
+        //
+        // `Version` is last, and it is the one row here that is always present
+        // on every machine: the build line belongs at the foot, after the
+        // machine has been described, because it is a fact about the program
+        // rather than about the hardware.
         let rows = labels(SYSTEM, &full());
         assert_eq!(&rows[..2], ["CPU", "RAM"]);
-        assert_eq!(rows.len(), 10, "the detail rows are missing: {rows:?}");
+        assert_eq!(rows.last(), Some(&"Version"));
+        assert_eq!(rows.len(), 11, "the detail rows are missing: {rows:?}");
     }
 
     #[test]
