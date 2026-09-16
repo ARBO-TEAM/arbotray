@@ -2,15 +2,13 @@
 
 use windows::core::{PCWSTR, w};
 
+/// The window class, registered on first show and reused after.
 pub(crate) const CLASS: PCWSTR = w!("ArboTrayWindow");
 
-/// Child id of the page list, handed to `CreateWindowExW` as an `HMENU` and
-/// read back out of the low word of `WM_COMMAND`'s `wparam`.
-pub(crate) const LIST_ID: i32 = 1;
-
-/// Where the Settings page's controls start. Deliberately far above `LIST_ID`:
-/// the list owns 1 and nothing else may take it, and a gap leaves room for
-/// another control on an existing page without renumbering anything.
+/// Where the Settings page's controls start. The sidebar is painted rather than
+/// a child window, so nothing owns id 1 any more; the gap above these is kept
+/// anyway, because a control added to an existing page must not renumber the
+/// ones already placed on the others.
 ///
 /// The Settings controls are addressed by id rather than by remembered handle
 /// values, because hiding and showing the page is a message away and the
@@ -74,3 +72,26 @@ pub(crate) const FIELD_W: i32 = 150;
 pub(crate) const TILE_LABELS: [&str; 8] = [
     "net_down", "net_up", "latency", "cpu", "ram", "wifi", "usage", "sparkline",
 ];
+
+/// The cursor left the window.
+///
+/// `WM_MOUSEMOVE` alone cannot tell "the pointer stopped moving over the
+/// sidebar" from "the pointer left the window", so a hovered entry would stay
+/// lit after the mouse was gone. This arrives exactly once per entry, after
+/// `TrackMouseEvent` asks for it, which is what clears that.
+///
+/// `Win32_UI_Controls` declares it and `WindowsAndMessaging` does not, and the
+/// feature is a much larger module than one message number is worth. It is a
+/// documented, stable value, so it is spelled out — the same call as
+/// `WM_ENABLE` below.
+pub(crate) const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// The up and down arrows, for moving between pages without the mouse.
+///
+/// A listbox navigated itself and this one does not, so the keys the list would
+/// have handled are handled by the window procedure instead. The bindings put
+/// these behind `Win32_UI_Input_KeyboardAndMouse`, which is enabled — for
+/// `TrackMouseEvent` — but the two are plain `i32` codes here rather than a
+/// `VIRTUAL_KEY` newtype, and the message handler is the only reader.
+pub(crate) const VK_UP: usize = 0x26;
+pub(crate) const VK_DOWN: usize = 0x28;

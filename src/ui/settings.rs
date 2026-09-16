@@ -358,7 +358,6 @@ pub(crate) fn create_control(
     }
 }
 
-
 /// Columns the tile checkboxes are laid out in. Two fits the eight tiles into
 /// four rows, which is what keeps the whole page inside the minimum window
 /// height without a scrollbar — and the minimum is a floor people actually
@@ -463,7 +462,10 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
 
         let pad = scale(PAD, state.dpi);
         let side = sidebar_w(state.dpi);
-        let x0 = if state.list.is_invalid() { pad } else { side + pad };
+        // Unconditional now that the sidebar is painted rather than a child
+        // window: there is no "the list failed to create" case left, and the
+        // controls therefore always line up under the captions `paint`draws.
+        let x0 = side + pad;
         let x1 = w - pad;
         if x1 <= x0 {
             return;
@@ -595,6 +597,7 @@ pub(crate) fn save_settings(hwnd: HWND, state: &mut UiState) -> String {
 /// The fonts the window draws with belong to `UiState`, not to the controls, so
 /// a font-size edit has to rebuild all three before the captions and heading
 /// match the controls beside them. The list gets the new face too.
+
 pub(crate) fn repaint_after_settings(hwnd: HWND, state: &mut UiState) {
     rebuild_fonts(state);
     // SAFETY: `hwnd` is our own live window.

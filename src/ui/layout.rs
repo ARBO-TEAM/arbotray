@@ -1,14 +1,11 @@
-//! 96-DPI metrics, the sidebar's placement and the font rebuild.
+//! 96-DPI metrics and the font rebuild.
 
 use crate::ui::fonts::create_font;
 use crate::ui::settings::layout_settings;
-use crate::ui::theme::{background, shade, sidebar_w};
+use crate::ui::theme::background;
 use crate::ui::UiState;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowPos, WM_SETFONT,
-};
 
 /// Metrics in 96-DPI pixels. The font and the sidebar width carry the scaling;
 /// these are the ratios everything else is laid out from.
@@ -28,41 +25,13 @@ pub(crate) const MIN_H: i32 = 320;
 pub(crate) const START_W: i32 = 720;
 pub(crate) const START_H: i32 = 460;
 
-/// What the window knows between repaints. Boxed and hung off the window's
-/// Put the sidebar where it belongs and give it the current font. Called on
-/// every resize, which is also what keeps it correct across a DPI change.
+/// Put the Settings controls where they belong. Called on every resize, which
+/// is also what keeps them correct across a DPI change.
+///
+/// The sidebar used to be placed from here too, as a child window with its own
+/// rectangle. It is painted now, so its geometry comes from the same constants
+/// the painter uses and there is nothing to position.
 pub(crate) fn layout(hwnd: HWND, state: &mut UiState) {
-    if state.list.is_invalid() {
-        return;
-    }
-    // SAFETY: `list` was checked, and both `SetWindowPos` and `SendMessageW`
-    // only touch our own child.
-    unsafe {
-        let mut rect = RECT::default();
-        if GetClientRect(hwnd, &mut rect).is_err() {
-            return;
-        }
-        let h = rect.bottom - rect.top;
-        if h <= 0 {
-            return;
-        }
-        let _ = SetWindowPos(
-            state.list,
-            None,
-            0,
-            0,
-            sidebar_w(state.dpi),
-            h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-        SendMessageW(
-            state.list,
-            WM_SETFONT,
-            Some(WPARAM(state.font.0 as usize)),
-            // `lparam` non-zero means "redraw now".
-            Some(LPARAM(1)),
-        );
-    }
     layout_settings(hwnd, state);
 }
 
@@ -81,15 +50,13 @@ pub(crate) fn rebuild_fonts(state: &mut UiState) {
     state.bold = create_font(&state.cfg, state.dpi, 1, true);
     state.title = create_font(&state.cfg, state.dpi, TITLE_EXTRA, true);
 
-    // The brushes are the theme too: a background edit has to move them or the
-    // sidebar and the controls keep the old face until the next launch.
+    // The controls' face is the theme too: a background edit has to move it or
+    // the checkboxes keep the old plate until the next launch.
     let bg = background(&state.cfg);
-    // SAFETY: both brushes are ours; the window holds them in `UiState` and
-    // replaces them here, so the old ones are no longer referenced.
+    // SAFETY: the brush is ours; the window holds it in `UiState` and replaces
+    // it here, so the old one is no longer referenced.
     unsafe {
-        let _ = DeleteObject(HGDIOBJ(state.side_brush.0));
         let _ = DeleteObject(HGDIOBJ(state.face_brush.0));
-        state.side_brush = CreateSolidBrush(shade(bg, 18));
         state.face_brush = CreateSolidBrush(bg);
     }
 }

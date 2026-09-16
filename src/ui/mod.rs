@@ -6,10 +6,12 @@
 //! sparkline's history have nowhere to go out there.
 //!
 //! Layout: a page list down the left, the selected page on the right. The list
-//! is a plain `LISTBOX` — a built-in user32 class, so no new dependency and no
-//! owner-draw plumbing — and it is themed through `WM_CTLCOLORLISTBOX`. Eight
-//! numbers do not need a sidebar, but they were already crowding one flat
-//! column, and every feature left in the list wants a page to live on.
+//! is painted by the window itself rather than built from a system control, so
+//! each entry can carry a glyph and the selection can be a rounded pill instead
+//! of a highlight bar. `sidebar` owns it; this file only routes the clicks,
+//! keys and hover to it. Eight numbers do not need a sidebar, but they were
+//! already crowding one flat column, and every feature left in the list wants a
+//! page to live on.
 //!
 //! It lives on the tray's own thread and is driven by direct calls rather than
 //! messages: same thread, so a sample is written straight into the window's
@@ -22,7 +24,9 @@
 //! the theme, fonts and metrics have a module each, and the pages, painter,
 //! sidebar and settings controls sit beside them.
 
+mod components;
 mod consts;
+mod design;
 mod fonts;
 mod layout;
 mod pages;
@@ -37,25 +41,30 @@ pub(crate) use layout::*;
 pub(crate) use pages::*;
 pub(crate) use paint::*;
 pub(crate) use settings::*;
-pub(crate) use sidebar::*;
 pub(crate) use theme::*;
+// `sidebar` is deliberately not glob-re-exported: its `paint` would collide
+// with the frame painter's, and the window procedure names it explicitly.
 
 use crate::config::Config;
 use crate::taskbar::TrayModel;
 use crate::taskbar::icon::app_icon;
-use crate::taskbar::render::parse_color;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HBRUSH, HGDIOBJ, HFONT, InvalidateRect,
     PAINTSTRUCT, SetBkColor, SetTextColor,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, LB_ERR, LB_GETCURSEL, LBN_SELCHANGE,
-    MINMAXINFO, MoveWindow, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE,
-    SW_SHOW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE,
-    WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE,
+    GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, MINMAXINFO, MoveWindow,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE,
     WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::w;
@@ -71,18 +80,23 @@ pub(crate) struct UiState {
     bold: HFONT,
     /// Page heading, a few points up from the body.
     title: HFONT,
-    /// The page list. A child window, so it paints itself; this handle is only
-    /// for laying it out and reading its selection.
-    list: HWND,
-    /// Which page is showing. Kept here rather than only in the listbox so a
-    /// frame can be painted without asking the child anything.
+    /// Which page is showing. The sidebar is painted from this, so it is the
+    /// only record of the selection there is.
     page: usize,
+    /// The sidebar entry the pointer is over, if any. Held between messages
+    /// because the hover pill is a pixel the *previous* frame drew: without it
+    /// a repaint would either lose the highlight or leave one behind.
+    hover: Option<usize>,
+    /// Whether `TrackMouseEvent` is already armed for this visit.
+    ///
+    /// It fires once and then stops, so it has to be re-armed every time the
+    /// pointer moves within the window — but only when it is not already
+    /// pending, or a smooth mouse would ask the system to track it on every
+    /// pixel of travel.
+    tracking: bool,
     /// Interface scale, from `WM_DPICHANGED`. Everything laid out by hand is
     /// multiplied by this.
     dpi: u32,
-    /// The sidebar's face, held because `WM_CTLCOLORLISTBOX` has to hand the
-    /// same brush back on every one of the list's paints.
-    side_brush: HBRUSH,
     /// The content face, for the same reason: the settings page's checkboxes
     /// and edit fields ask their parent for a background brush on every paint
     /// of their own, and a control that is handed the wrong one shows a grey
@@ -104,6 +118,7 @@ pub(crate) struct UiState {
     handed_back: bool,
 }
 
+
 /// Show the window, creating it the first time. `existing` is the caller's
 /// remembered handle; an invalid one means "not up yet".
 pub fn ensure(instance: HINSTANCE, cfg: &Config, hint: &TrayModel, existing: HWND) -> Option<HWND> {
@@ -119,12 +134,12 @@ pub fn ensure(instance: HINSTANCE, cfg: &Config, hint: &TrayModel, existing: HWN
         font: create_font(cfg, 96, 0, false),
         bold: create_font(cfg, 96, 1, true),
         title: create_font(cfg, 96, TITLE_EXTRA, true),
-        list: HWND::default(),
         page: OVERVIEW,
+        hover: None,
+        tracking: false,
         dpi: 96,
         // Owned by the window from here, same as the fonts: `WM_NCDESTROY`
         // deletes it.
-        side_brush: unsafe { CreateSolidBrush(shade(bg, 18)) },
         face_brush: unsafe { CreateSolidBrush(bg) },
         instance,
         settings: SettingsForm::from_config(cfg),
@@ -256,6 +271,7 @@ pub fn close(hwnd: HWND) {
     }
 }
 
+
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if msg == WM_NCCREATE {
@@ -271,13 +287,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
         match msg {
             // Before the first paint, so nothing is ever drawn into a window
-            // that has no sidebar to lay out.
+            // that has no sidebar to lay out. The sidebar needs no child of its
+            // own now — `chrome` is here for the frame around the client area.
             WM_CREATE => {
                 if !state.is_null() {
                     let s = &mut *state;
-                    create_sidebar(hwnd, s);
                     create_settings(hwnd, s);
                     layout(hwnd, s);
+                    chrome(hwnd, s);
                 }
                 LRESULT(0)
             }
@@ -289,28 +306,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
 
-            // Both the page list and the Settings page's own controls arrive
-            // here. The list is dispatched on its id and its notification; the
-            // settings controls have no notification worth filtering on, so
-            // their id alone is the test.
+            // The Settings page's own controls, dispatched on id alone. The
+            // page list used to arrive here too; it is drawn by us now, and
+            // picking a page is a click below.
             WM_COMMAND => {
                 if !state.is_null() {
                     let s = &mut *state;
                     let id = control_id(wparam);
-                    if id == LIST_ID && high_word(wparam.0) as u32 == LBN_SELCHANGE {
-                        if !s.list.is_invalid() {
-                            let picked = SendMessageW(s.list, LB_GETCURSEL, None, None).0 as i32;
-                            if picked != LB_ERR && picked >= 0 {
-                                s.page = picked as usize;
-                                // The controls belong to one page and are
-                                // clipped to their own rects, not to the page
-                                // they are on: leaving them up would paint
-                                // eight checkboxes over the sparkline.
-                                show_settings(hwnd, s.page == SETTINGS);
-                                let _ = InvalidateRect(Some(hwnd), None, false);
-                            }
-                        }
-                    } else if id == SET_QUOTA_ON {
+                    if id == SET_QUOTA_ON {
                         // Disabled rather than silently ignored: with the
                         // switch off the number has no meaning, and leaving it
                         // editable would suggest it does.
@@ -356,19 +359,90 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
 
-            // The list is a system control and would paint itself grey with a
-            // white well. Hand it the theme instead: this paints each item's
-            // background, and the returned brush fills the empty space below
-            // the last row.
-            WM_CTLCOLORLISTBOX => {
+            // The pointer moved: find out which entry, if any, is under it, and
+            // repaint only when that changed. The sidebar is drawn, so hover is
+            // a pixel we have to maintain rather than a state the system keeps.
+            WM_MOUSEMOVE => {
                 if !state.is_null() {
-                    let s = &*state;
-                    let dc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
-                    let _ = SetBkColor(dc, shade(background(&s.cfg), 18));
-                    let _ = SetTextColor(dc, parse_color(&s.cfg.theme.foreground).unwrap_or(fg_default()));
-                    return LRESULT(s.side_brush.0 as isize);
+                    let s = &mut *state;
+                    // Signed halves, not the raw `lparam`: a mouse above or to
+                    // the left of the window reports a negative coordinate, and
+                    // reading them as unsigned would put the pointer thousands
+                    // of pixels inside the sidebar.
+                    let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                    let hover = sidebar::hit_test(s, x, y);
+                    if hover != s.hover {
+                        s.hover = hover;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    // Armed once per visit. `TrackMouseEvent` fires a single
+                    // `WM_MOUSELEAVE` and then stops, so this re-arms it while
+                    // the pointer is here — but only when it is not already
+                    // pending, which is what keeps it off the per-pixel path.
+                    if !s.tracking {
+                        let mut track = TRACKMOUSEEVENT {
+                            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        if TrackMouseEvent(&mut track).is_ok() {
+                            s.tracking = true;
+                        }
+                    }
                 }
-                DefWindowProcW(hwnd, msg, wparam, lparam)
+                LRESULT(0)
+            }
+
+            // The pointer left. One of these per visit, so the flag is cleared
+            // here rather than on every move.
+            WM_MOUSELEAVE => {
+                if !state.is_null() {
+                    let s = &mut *state;
+                    s.tracking = false;
+                    if s.hover.take().is_some() {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+                LRESULT(0)
+            }
+
+            // A click anywhere in the sidebar. Off an entry it does nothing at
+            // all — not even clear the selection — because the list is navigation
+            // and there is nowhere to navigate away from.
+            WM_LBUTTONDOWN => {
+                if !state.is_null() {
+                    let s = &mut *state;
+                    let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                    if let Some(page) = sidebar::hit_test(s, x, y) {
+                        // `select` shows and hides the Settings controls and
+                        // invalidates, so the repaint is not repeated here.
+                        sidebar::select(hwnd, s, page);
+                    }
+                }
+                LRESULT(0)
+            }
+
+            // The listbox used to move between pages on the arrow keys by
+            // itself. It is drawn by us now, so the keys are ours too: without
+            // this the sidebar becomes mouse-only and the window loses the
+            // keyboard navigation it has always had.
+            WM_KEYDOWN => {
+                if !state.is_null() {
+                    let s = &mut *state;
+                    let last = PAGES.len() - 1;
+                    let page = match wparam.0 {
+                        VK_UP => s.page.saturating_sub(1),
+                        VK_DOWN => (s.page + 1).min(last),
+                        _ => {
+                            return DefWindowProcW(hwnd, msg, wparam, lparam);
+                        }
+                    };
+                    sidebar::select(hwnd, s, page);
+                }
+                LRESULT(0)
             }
 
             WM_PAINT => {
@@ -440,7 +514,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let _ = DeleteObject(HGDIOBJ(s.font.0));
                     let _ = DeleteObject(HGDIOBJ(s.bold.0));
                     let _ = DeleteObject(HGDIOBJ(s.title.0));
-                    let _ = DeleteObject(HGDIOBJ(s.side_brush.0));
                     let _ = DeleteObject(HGDIOBJ(s.face_brush.0));
                 }
                 LRESULT(0)
@@ -451,16 +524,64 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
-/// Low and high halves of a `WPARAM`, which is where `WM_COMMAND` packs the
-/// child id and the notification code. `LOWORD`/`HIWORD` are not in the
-/// bindings, and the masks are the whole of them.
+
+/// The low half of a `WPARAM`, which is where `WM_COMMAND` packs the child id.
+/// `LOWORD` is not in the bindings and the mask is the whole of it.
+///
+/// The high half — the notification code — is deliberately not unpacked: the
+/// only control that ever sent one worth filtering on was the page list, and a
+/// click on the sidebar is a mouse message now.
 pub(crate) fn low_word(value: usize) -> u16 {
     (value & 0xFFFF) as u16
 }
 
-pub(crate) fn high_word(value: usize) -> u16 {
-    ((value >> 16) & 0xFFFF) as u16
+/// Make the title bar and the frame match the theme.
+///
+/// The client area is painted by us and everything around it is drawn by the
+/// shell, so without this a dark theme wears a white caption and the mismatch
+/// is the first thing anyone notices. Three attributes, each independently
+/// optional:
+///
+/// * `DWMWA_USE_IMMERSIVE_DARK_MODE` — the caption and the system buttons.
+/// * `DWMWA_WINDOW_CORNER_PREFERENCE` — rounded corners. The one piece of
+///   Windows' own chrome that already looks like the rest of the window.
+/// * `DWMWA_BORDER_COLOR` — the frame, in the palette's divider colour, so the
+///   outline is the same step off the surface that separates the sidebar.
+///
+/// Every call is tolerant of failure by construction: all three attributes are
+/// Windows 11 additions, and on Windows 10 each one returns an error, having
+/// changed nothing. A window with a square border and a system-coloured frame
+/// is the Windows 10 result and is perfectly usable, which is why this is not
+/// worth a version check.
+fn chrome(hwnd: HWND, state: &UiState) {
+    let pal = crate::ui::design::palette(&state.cfg);
+    let dark = i32::from(crate::ui::design::is_dark(&state.cfg));
+    let corner = DWMWCP_ROUND;
+    // SAFETY: three by-value attributes handed to the compositor for our own
+    // window. Each pointer is to a local that outlives the call, and each size
+    // is that local's own.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const i32 as *const core::ffi::c_void,
+            size_of::<i32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &corner as *const _ as *const core::ffi::c_void,
+            size_of_val(&corner) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &pal.border as *const _ as *const core::ffi::c_void,
+            size_of_val(&pal.border) as u32,
+        );
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -497,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn every_page_is_reachable_from_the_list() {
-        // The list is built from `PAGES` and indexed by position, so a page
+    fn every_page_is_reachable_from_the_sidebar() {
+        // The sidebar is built from `PAGES` and indexed by position, so a page
         // whose rows fall through to `_` would be silently invisible.
         for (i, name) in PAGES.iter().enumerate() {
             assert!(!name.is_empty(), "page {i} has no label to click");
@@ -548,9 +669,9 @@ mod tests {
         }
         assert_eq!(seen.len(), FIELD_ROWS.len());
 
-        // Nothing may collide with the page list or with a tile checkbox.
+        // Nothing may collide with a tile checkbox. The sidebar needs no id of
+        // its own: it is painted, so nothing arrives for it through `WM_COMMAND`.
         for id in &seen {
-            assert_ne!(*id, LIST_ID);
             assert!(!TILE_IDS.contains(id), "control {id} collides with a tile");
         }
         // The two Save/Reload buttons are both on the last row.
@@ -883,12 +1004,28 @@ mod tests {
 
     #[test]
     fn the_command_packing_is_unpacked_the_way_windows_packs_it() {
-        // `WM_COMMAND` low word is the child id, high word the notification.
-        let packed = (LBN_SELCHANGE as usize) << 16 | LIST_ID as usize;
-        assert_eq!(low_word(packed) as i32, LIST_ID);
-        assert_eq!(high_word(packed) as u32, LBN_SELCHANGE);
-        // A different control's notification must not switch our page.
-        assert_ne!(low_word((LBN_SELCHANGE as usize) << 16 | 7) as i32, LIST_ID);
+        // `WM_COMMAND` low word is the child id and the high word is the
+        // notification, which is why the id has to be masked off before it is
+        // compared: an unmasked `wparam` would never equal any control's id.
+        // 0 in the high half is `BN_CLICKED`, which is what a checkbox sends.
+        let packed = SET_QUOTA_ON as usize;
+        assert_eq!(low_word(packed) as i32, SET_QUOTA_ON);
+        // A different control's click must not reach the quota switch.
+        assert_ne!(low_word(packed) as i32, SET_QUOTA);
+        assert_eq!(low_word(SET_SAVE as usize) as i32, SET_SAVE);
+    }
+
+    #[test]
+    fn a_click_off_the_sidebar_does_not_change_the_page() {
+        // The sidebar is a strip down the left. Reading a coordinate as
+        // unsigned would turn a click to its left — or a move above the window
+        // — into a large positive `x`, and the entry under it would be whatever
+        // arithmetic happened to land on. Both halves of a mouse message have
+        // to be sign-extended before they are used.
+        let sign_extend = |low: i64| (low & 0xFFFF) as u16 as i16 as i32;
+        assert_eq!(sign_extend(-1 & 0xFFFF), -1);
+        assert_eq!(sign_extend(-4000 & 0xFFFF), -4000);
+        assert_eq!(sign_extend(150), 150);
     }
 
     #[test]
