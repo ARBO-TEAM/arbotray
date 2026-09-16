@@ -79,6 +79,22 @@ A malformed colour degrades to a readable default rather than taking the tray do
 
 Only the physical interfaces are counted. IP Helper also lists a row per protocol driver bound to each NIC — WFP, QoS Packet Scheduler, the Hyper-V switch extension — and every one of those rows repeats its parent NIC's counters verbatim rather than reporting its own, so a NIC with three filters bound appears four times. Summing every up row therefore multiplies the real traffic by the number of bound filters, which read as gigabytes of phantom usage from a few hundred megabytes of work.
 
+## Start with Windows
+
+The **Start with Windows** checkbox on the Settings page writes one value, `ArboTray`, to the per-user key Windows itself reads at logon:
+
+```
+HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+```
+
+No elevation, no scheduled task — the same key `install.ps1 -Autostart` writes, so the two agree rather than fight. The path is stored quoted, because the value is parsed as a command line and an unquoted path with a space in it would be read as an executable plus arguments.
+
+The registry is the only source of truth. There is deliberately no `autostart` field in `config.json`: a copy of that state can desync from the key — via `install.ps1 -Autostart`, Task Manager's Startup tab, or a hand edit — and the checkbox would then report a state Windows does not honour. It is for the same reason that the checkbox writes on the click instead of at Save, and rolls its tick back if the write fails.
+
+The check compares paths rather than merely looking for the value, so a `Run` entry left pointing at a moved or reinstalled `arbotray.exe` reads as **off** — Windows would silently fail to start it, and a ticked box would be a lie about what happens at logon. Ticking it again rewrites the entry.
+
+Starting this way means the process can be up before Explorer has created the taskbar. The app retries the attach for up to 20 seconds — the first attempt immediate, so an ordinary launch is unchanged — instead of delaying the launch from a task trigger.
+
 ## Single instance
 
 A named mutex (`ArboTray.SingleInstance`) guards against a second copy.
