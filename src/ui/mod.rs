@@ -24,11 +24,14 @@
 //! the theme, fonts and metrics have a module each, and the pages, painter,
 //! sidebar and settings controls sit beside them.
 
+mod chart;
 mod components;
 mod consts;
 mod design;
 mod fonts;
 mod layout;
+mod modal;
+pub(crate) use modal::{Action, Confirm, Modal, Outcome};
 mod pages;
 mod paint;
 mod settings;
@@ -48,6 +51,9 @@ pub(crate) use theme::*;
 use crate::config::Config;
 use crate::taskbar::TrayModel;
 use crate::taskbar::icon::app_icon;
+// Named because the tests build one: production code only ever reads the list.
+#[cfg(test)]
+use crate::taskbar::OpenPort;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -57,20 +63,21 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HBRUSH, HGDIOBJ, HFONT, InvalidateRect,
     PAINTSTRUCT, SetBkColor, SetTextColor,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, MINMAXINFO, MoveWindow,
+    GetClientRect, GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, MINMAXINFO, MoveWindow,
     RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
     SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
     WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
     WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_SIZE,
     WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
 };
+use crate::telemetry::SpeedTest;
 use windows::core::w;
 
-/// What the window knows between repaints. Boxed and hung off the window's
-/// `GWLP_USERDATA`, so there is no global and no lifetime to get wrong.
 pub(crate) struct UiState {
     model: TrayModel,
     cfg: Config,
@@ -116,12 +123,55 @@ pub(crate) struct UiState {
     /// Set when a save has replaced `cfg` and the tray has not been told yet.
     /// `update` clears it as it hands the config over. See `save_settings`.
     handed_back: bool,
+    /// The speed test, for the Speed Test page's Run button. A handle to the
+    /// same run the telemetry thread reports on, so a test started here shows
+    /// up in the model within one tick.
+    speed: SpeedTest,
+    /// The last `speed_running` a sample carried, so the Run button is only
+    /// told about a change rather than on every tick. A `SendMessage` per
+    /// second to a control nobody is looking at is worth not doing.
+    prev_running: bool,
+    /// Which open port the user has clicked on the Ports page, as the pid that
+    /// holds it.
+    ///
+    /// The pid and not an index, because the list is rebuilt every tick and a
+    /// port that closes takes its row with it — every row under it then slides
+    /// up into a different index, so an index-based selection would end up
+    /// highlighting a port nobody clicked. A pid survives that: it is a
+    /// property of the row rather than of where the row happened to sit, and it
+    /// is what the Stop action needs anyway.
+    ///
+    /// The list dedupes by port, so one pid can hold two rows. That is why this
+    /// is resolved by position on every use — `selected_index` — rather than
+    /// trusted to name exactly one row.
+    selected_port: Option<u32>,
+    /// The confirmation popup, if one is up. Held here rather than as a child
+    /// window so the frame can dim behind it in the same paint pass.
+    modal: Modal,
+    /// The bands the Ports page's open-port rows were last drawn on, in the
+    /// model's own order. Recorded by the painter and read by the hit test.
+    ///
+    /// A layout cache rather than arithmetic repeated in two places: the rows
+    /// are laid out by walking a `Canvas`, whose cursor depends on how many
+    /// metric rows above them were filled, so a second copy of that sum would
+    /// be a second answer to "which row did I just click".
+    port_rows: Vec<RECT>,
+    /// What the last force-stop did, painted at the foot of the Ports page.
+    /// Separate from `notice`, which belongs to the Settings page: a save's
+    /// confirmation has no business appearing over a list of sockets.
+    port_notice: Option<String>,
 }
 
 
 /// Show the window, creating it the first time. `existing` is the caller's
 /// remembered handle; an invalid one means "not up yet".
-pub fn ensure(instance: HINSTANCE, cfg: &Config, hint: &TrayModel, existing: HWND) -> Option<HWND> {
+pub fn ensure(
+    instance: HINSTANCE,
+    cfg: &Config,
+    hint: &TrayModel,
+    existing: HWND,
+    speed: SpeedTest,
+) -> Option<HWND> {
     // SAFETY: `existing` is only tested, never dereferenced.
     if !existing.is_invalid() && unsafe { IsWindow(Some(existing)) }.as_bool() {
         return Some(existing);
@@ -145,6 +195,12 @@ pub fn ensure(instance: HINSTANCE, cfg: &Config, hint: &TrayModel, existing: HWN
         settings: SettingsForm::from_config(cfg),
         notice: None,
         handed_back: false,
+        speed,
+        prev_running: false,
+        selected_port: None,
+        modal: Modal::default(),
+        port_rows: Vec::new(),
+        port_notice: None,
     });
     // Handed to the window, which owns it from here: `WM_NCDESTROY` turns this
     // back into a `Box` and drops it. Freeing it here instead would leave
@@ -221,6 +277,64 @@ pub fn show(hwnd: HWND) {
 /// is not up, so the tray can call it unconditionally once per tick.
 ///
 /// Returns a config to adopt instead of the one the tray is running with, and
+impl UiState {
+    /// Do what a confirmed popup asked for.
+    ///
+    /// The one place this window changes something outside itself, and it is
+    /// reached only from a confirmation — never from a click, and never from a
+    /// sample. Every action reports through `port_notice` afterwards, including
+    /// the failures, because "nothing happened" is the one outcome a destructive
+    /// button must never give silently.
+    fn run_action(&mut self, action: Action) {
+        match action {
+            Action::StopPort { pid, name } => {
+                if crate::telemetry::ports::stop_process(pid) {
+                    // Cleared here rather than left to the next sample: the
+                    // process is gone, so its row is about to be, and a
+                    // selection on a row that is leaving is a highlight on
+                    // whatever slides up into its place.
+                    if self.selected_port == Some(pid) {
+                        self.selected_port = None;
+                    }
+                    self.port_notice = Some(format!("stopped {name}"));
+                } else {
+                    // The expected answer on an unelevated process, so it is
+                    // phrased as what to do about it rather than as a fault.
+                    self.port_notice =
+                        Some(format!("could not stop {name} — try running as administrator"));
+                }
+            }
+        }
+    }
+
+    /// The question a Stop click raises, from the current selection.
+    ///
+    /// `None` when nothing is selected or the row has gone, which is the
+    /// button's disabled state — the two agree because both read
+    /// `selected_port` rather than either caching its own answer.
+    fn stop_question(&self) -> Option<Confirm> {
+        let pid = self.selected_port?;
+        let entry = self.model.open_ports.iter().find(|p| p.pid == pid)?;
+        // What to call it in the question. The row's value is
+        // `"svchost.exe  pid 1024"`, and the pid is already in the sentence
+        // below, so only the name is taken.
+        let name = entry
+            .owner
+            .split("  pid ")
+            .next()
+            .unwrap_or(&entry.owner)
+            .to_string();
+        Some(Confirm {
+            title: format!("Stop the process on {}?", entry.port),
+            body: format!(
+                "This ends {name} (pid {pid}), which is holding {}. Anything unsaved in it is lost.",
+                entry.port
+            ),
+            action: Action::StopPort { pid, name },
+        })
+    }
+}
+
 /// only ever once per edit. The Settings page has to reach a renderer that
 /// lives on the tray window, and the telemetry thread cannot do it: it is
 /// neither the window's thread nor the edit's author. So the page writes what
@@ -242,6 +356,24 @@ pub fn update(hwnd: HWND, model: &TrayModel) -> Option<Config> {
             return None;
         }
         (*state).model = model.clone();
+        // A port the user had selected can close between two samples — by
+        // itself, or by the process exiting. The selection is dropped when the
+        // pid is no longer in the list at all, rather than left standing: a
+        // highlight on a row nobody chose is worse than no highlight, and the
+        // Stop button is aimed by the same selection.
+        if let Some(pid) = (*state).selected_port {
+            if !model.open_ports.iter().any(|p| p.pid == pid) {
+                (*state).selected_port = None;
+            }
+        }
+        // The Run button's enablement is the one piece of a page that is not a
+        // pixel. It has to be refreshed per tick because the run that re-enables
+        // it ends on the telemetry thread, which cannot touch a control — and a
+        // menu command or a repaint is not guaranteed to arrive in between.
+        if !model.speed_running || !(*state).prev_running {
+            set_enabled(hwnd, SET_SPEED, !model.speed_running);
+        }
+        (*state).prev_running = model.speed_running;
         // The content area only: the sidebar does not change with a sample.
         let _ = InvalidateRect(Some(hwnd), None, false);
 
@@ -326,6 +458,28 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         // on its own — and a save that changed the theme has
                         // to show its own result here too.
                         repaint_after_settings(hwnd, s);
+                    } else if id == SET_STOP {
+                        // Nothing happens here: the click only raises the
+                        // question. The kill is done by `run_action` once the
+                        // popup has been answered, which is what keeps a
+                        // destructive call off the click path entirely.
+                        if let Some(confirm) = s.stop_question() {
+                            s.modal.open(confirm);
+                            // The notice described the selection this question
+                            // is about, so it is stale the moment it is asked.
+                            s.port_notice = None;
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                    } else if id == SET_SPEED {
+                        // Refused rather than restarted when one is already in
+                        // flight: a test cancelled halfway reports half a link,
+                        // and the phase row — not the button — is the feedback.
+                        let _ = s.speed.start();
+                        // The run itself is reported by the telemetry thread a
+                        // tick later, so nothing is read back here. Repaint so
+                        // the button greys out on the same click rather than on
+                        // whatever the next sample happens to be.
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     } else if id == SET_RESET {
                         // Back to what is on disk — not to the built-in
                         // defaults, and not to whatever is running. The file is
@@ -371,7 +525,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // of pixels inside the sidebar.
                     let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
-                    let hover = sidebar::hit_test(s, x, y);
+                    // The popup is modal, so nothing under it hovers: a
+                    // sidebar pill lighting up behind a dimmed scrim reads as a
+                    // window that cannot decide whether it is blocked.
+                    let hover = if s.modal.is_open() {
+                        None
+                    } else {
+                        sidebar::hit_test(s, x, y)
+                    };
                     if hover != s.hover {
                         s.hover = hover;
                         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -416,10 +577,52 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let s = &mut *state;
                     let x = (lparam.0 & 0xFFFF) as u16 as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32;
+                    let mut client = RECT::default();
+                    let _ = GetClientRect(hwnd, &mut client);
+
+                    // The popup takes the click first and swallows it whether or
+                    // not it landed on a button. Nothing behind it is reachable
+                    // while it is up — that is what makes it a modal rather than
+                    // a floating panel.
+                    if s.modal.is_open() {
+                        match s.modal.click(&client, s.dpi, x, y) {
+                            Some(Outcome::Confirmed(action)) => s.run_action(action),
+                            // Dismissed, or a click that landed on nothing.
+                            // Either way the frame just loses the scrim.
+                            Some(Outcome::Cancelled) | None => {}
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
+                    }
+
                     if let Some(page) = sidebar::hit_test(s, x, y) {
+                        // A question about a row on the page being left is a
+                        // question about nothing.
+                        s.modal.dismiss();
                         // `select` shows and hides the Settings controls and
                         // invalidates, so the repaint is not repeated here.
                         sidebar::select(hwnd, s, page);
+                        return LRESULT(0);
+                    }
+
+                    // The Ports page's list: a click selects the row's process
+                    // as the thing the Stop button is aimed at. Anywhere else on
+                    // the page clears the selection, so there is a way to take
+                    // the aim back without leaving the page.
+                    if s.page == PORTS {
+                        let hit = s
+                            .port_rows
+                            .iter()
+                            .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                            .and_then(|i| s.model.open_ports.get(i))
+                            .map(|p| p.pid);
+                        if hit != s.selected_port {
+                            s.selected_port = hit;
+                            // The notice described the *previous* selection, so
+                            // it goes with it.
+                            s.port_notice = None;
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
                     }
                 }
                 LRESULT(0)
@@ -432,6 +635,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             WM_KEYDOWN => {
                 if !state.is_null() {
                     let s = &mut *state;
+                    // Escape answers the popup and nothing else. Checked first,
+                    // and before the arrow keys: a modal that lets the page
+                    // change under it is a modal the user can lose.
+                    if s.modal.is_open() {
+                        if wparam.0 as u16 == VK_ESCAPE.0 {
+                            s.modal.dismiss();
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                        return LRESULT(0);
+                    }
                     let last = PAGES.len() - 1;
                     let page = match wparam.0 {
                         VK_UP => s.page.saturating_sub(1),
@@ -451,7 +664,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 }
                 let mut ps = PAINTSTRUCT::default();
                 let _ = BeginPaint(hwnd, &mut ps);
-                paint(hwnd, &*state);
+                paint(hwnd, &mut *state);
                 let _ = EndPaint(hwnd, &ps);
                 LRESULT(0)
             }
@@ -628,6 +841,37 @@ mod tests {
                 ("C:".into(), "210G free of 931G".into()),
                 ("D:".into(), "1.2T free of 1.8T".into()),
             ],
+            // The Ports page's detail, likewise filled: the open-port list is
+            // painted outside `page_rows` and has its own empty state, so the
+            // tests that walk a page need the non-empty branch.
+            listeners_text: "24".into(),
+            established_text: "87".into(),
+            udp_text: "31".into(),
+            port_owners_text: "42".into(),
+            open_ports: vec![
+                OpenPort {
+                    port: ":445".into(),
+                    owner: "System  pid 4".into(),
+                    pid: 4,
+                },
+                OpenPort {
+                    port: ":5040".into(),
+                    owner: "svchost.exe  pid 1024".into(),
+                    pid: 1024,
+                },
+            ],
+            // The Speed Test page's, with a finished run rather than a live one:
+            // a running test is the state the page has one row more of, and the
+            // ordering tests are about the rows that are always there.
+            speed_phase_text: "Done".into(),
+            speed_percent: 100,
+            speed_running: false,
+            speed_down_text: "94.2M/s".into(),
+            speed_up_text: "11.8M/s".into(),
+            speed_latency_text: "14ms".into(),
+            speed_error_text: String::new(),
+            speed_when_text: "14:32:07".into(),
+            speed_history: vec![("14:32:07".into(), "94.2M/s / 11.8M/s".into())],
         }
     }
 

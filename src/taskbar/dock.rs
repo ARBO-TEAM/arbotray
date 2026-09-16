@@ -10,6 +10,7 @@ use crate::taskbar::TrayModel;
 use crate::taskbar::events::{WM_TRAY_UPDATE, WindowState, wnd_proc};
 use crate::taskbar::icon::Icon;
 use crate::taskbar::render::Renderer;
+use crate::telemetry::SpeedTest;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
@@ -105,7 +106,12 @@ impl Notifier {
 
 impl Tray {
     /// Find the taskbar, create the child window, and dock it.
-    pub fn attach(cfg: &Config) -> AttachResult<(Self, Notifier)> {
+    ///
+    /// `speed` is carried into the window state so the dashboard can start a
+    /// run. It is the same handle the telemetry thread reads, because a run
+    /// started from the button and a run reported in the model have to be the
+    /// same run.
+    pub fn attach(cfg: &Config, speed: SpeedTest) -> AttachResult<(Self, Notifier)> {
         use windows::Win32::Foundation::GetLastError;
         // SAFETY: every call here passes live locals or well-known strings.
         unsafe {
@@ -148,6 +154,7 @@ impl Tray {
                 instance: HINSTANCE(module.0),
                 ui: HWND::default(),
                 telemetry: shared,
+                speed,
             });
 
             // Reserve width from a worst-case sample so changing digits never
@@ -321,6 +328,13 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         } else {
             Vec::new()
         },
+        // The Ports and Speed Test pages are the same case again: every field is
+        // detail for a page the taskbar never draws, so none of them has a width
+        // to reserve. Left to `Default` rather than listed one by one — there
+        // are a dozen of them, and this way a new page field cannot silently
+        // widen the strip by being forgotten here. `visible_segments` is the
+        // real gate, and it names its fields explicitly.
+        ..Default::default()
     }
 }
 

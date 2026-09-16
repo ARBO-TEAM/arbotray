@@ -11,11 +11,11 @@
 //! rectangle, a hairline, a glyph and a label-value pair, which is everything
 //! the four metric pages and the settings page are actually made of.
 
-use crate::ui::design::{GROUP_COL, ICON_COL, Palette, S1, S2, S3, S6};
+use crate::ui::design::{GROUP_COL, ICON_COL, Palette, RADIUS, S1, S2, S3, S6};
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DeleteObject, DrawTextW, GetStockObject, HDC, HGDIOBJ, HFONT, NULL_PEN, PS_SOLID,
+    DT_WORDBREAK, DeleteObject, DrawTextW, GetStockObject, HDC, HGDIOBJ, HFONT, NULL_PEN, PS_SOLID,
     Polyline, RoundRect, SelectObject, SetTextColor,
 };
 
@@ -56,6 +56,34 @@ pub(crate) unsafe fn draw(
     unsafe {
         SelectObject(dc, HGDIOBJ(font.0));
         DrawTextW(dc, &mut wide, &mut rect, DT_SINGLELINE | DT_NOPREFIX | align);
+    }
+}
+
+/// One multi-line run of text, wrapped at word boundaries inside `rect`.
+///
+/// The sibling of `draw`, and the only caller is the confirmation popup's body:
+/// a sentence that has to fit a card is the one string in the window whose
+/// breaks are not already known to the caller.
+///
+/// # Safety
+/// `dc` must be a live DC and `font` a live font.
+pub(crate) unsafe fn draw_block(
+    dc: HDC,
+    font: HFONT,
+    text: &str,
+    rect: RECT,
+    align: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = rect;
+    // SAFETY: the font and DC are the caller's, both live; `wide` and `rect`
+    // outlive the call.
+    unsafe {
+        SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(dc, &mut wide, &mut rect, DT_WORDBREAK | DT_NOPREFIX | align);
     }
 }
 
@@ -148,18 +176,22 @@ pub(crate) struct Fonts {
 /// rather than as a list of `SetTextColor` calls with the contents between
 /// them.
 pub(crate) struct Canvas<'a> {
-    dc: HDC,
-    fonts: &'a Fonts,
-    pal: &'a Palette,
+    /// Not private: the history chart is a painter of its own rather than a
+    /// component, because it fills a rectangle the frame sizes at the last
+    /// moment — and what it borrows from here is the frame's DC, faces, colours
+    /// and row metrics, which are the same four things every component uses.
+    pub(crate) dc: HDC,
+    pub(crate) fonts: &'a Fonts,
+    pub(crate) pal: &'a Palette,
     /// Content column.
-    x0: i32,
-    x1: i32,
+    pub(crate) x0: i32,
+    pub(crate) x1: i32,
     /// Where the next component starts.
     y: i32,
-    row_h: i32,
+    pub(crate) row_h: i32,
     /// A row's text sits a little below its band's top, which is what makes a
     /// label and its value look level.
-    nudge: i32,
+    pub(crate) nudge: i32,
     /// Replaces the palette's body colour for rows. Set for a whole page — an
     /// over-quota window is red top to bottom rather than red in a footnote.
     emph: Option<COLORREF>,
@@ -373,6 +405,67 @@ impl<'a> Canvas<'a> {
         self.y += self.row_h;
     }
 
+    /// A selected row's fill, on the band the cursor is on.
+    ///
+    /// Drawn *before* the row rather than after it, so the row's own text sits
+    /// on top: a pill painted afterwards would cover the label it belongs to.
+    /// It claims no space — it is the same band, filled — so a selection
+    /// appearing cannot move any row.
+    pub(crate) fn pill(&mut self) {
+        // SAFETY: a live DC; `rounded_fill` documents its own contract.
+        unsafe {
+            rounded_fill(
+                self.dc,
+                RECT {
+                    left: self.x0,
+                    top: self.y,
+                    right: self.x1,
+                    bottom: self.y + self.row_h,
+                },
+                RADIUS,
+                self.pal.selected,
+            );
+        }
+    }
+
+    /// A row with a progress track drawn in the band under it.
+    ///
+    /// The track is inside the row's own band rather than on one of its own, so
+    /// a bar that appears the moment a run starts cannot push the rows beneath
+    /// it down — the same reason the group headings ride on a row. The band is
+    /// 30 pixels and single-line text is about 17 of them, so the last few are
+    /// free.
+    pub(crate) fn progress(&mut self, label: &str, value: &str, percent: u32) {
+        let top = self.y;
+        self.row(label, value);
+
+        let track = RECT {
+            left: self.x0,
+            // Pinned to the foot of the band, not to a fixed offset: the row
+            // height is the caller's and this has to stay under the text at
+            // every scale.
+            top: top + self.row_h - S1,
+            right: self.x1,
+            bottom: top + self.row_h,
+        };
+        let filled = ((self.x1 - self.x0) * percent.min(100) as i32) / 100;
+        // SAFETY: a live DC; `rounded_fill` documents its own contract.
+        unsafe {
+            rounded_fill(self.dc, track, 2, self.pal.border);
+            if filled > 0 {
+                rounded_fill(
+                    self.dc,
+                    RECT {
+                        right: track.left + filled,
+                        ..track
+                    },
+                    2,
+                    self.pal.accent,
+                );
+            }
+        }
+    }
+
     /// An empty-state line for a page with nothing to report yet.
     pub(crate) fn empty(&mut self, text: &str) {
         self.space(S6);
@@ -435,6 +528,12 @@ mod tests {
         let before_head = c.y();
         c.heading_row("Traffic");
         assert_eq!(c.y(), before_head, "a group heading must not claim a band");
+
+        // The track is drawn *inside* the band the row already claimed, which
+        // is the only reason a bar can appear mid-run without moving the page.
+        let before_bar = c.y();
+        c.progress("Progress", "42%", 42);
+        assert_eq!(c.y() - before_bar, 30, "a progress row is one band, track included");
 
         let before_note = c.y();
         c.note("saved", pal.text);

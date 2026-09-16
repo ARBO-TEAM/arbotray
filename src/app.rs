@@ -7,7 +7,7 @@
 
 use crate::config::{Config, interval_duration};
 use crate::taskbar::{Tray, TrayModel};
-use crate::telemetry::Sampler;
+use crate::telemetry::{Sampler, SpeedTest};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::w;
@@ -27,7 +27,14 @@ pub fn run() -> i32 {
 
     let cfg = Config::load();
 
-    let (tray, notifier) = match Tray::attach(&cfg) {
+    // The speed test is owned here rather than by the telemetry thread: it is
+    // started by a button on a window the telemetry thread has no handle to,
+    // and its runs outlive the sample that started them. It is handed to both
+    // the sampler — which folds the current run into each model — and the
+    // dashboard, which starts runs.
+    let speed = SpeedTest::new();
+
+    let (tray, notifier) = match Tray::attach(&cfg, speed.clone()) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("arbotray: cannot attach to taskbar: {e}");
@@ -37,7 +44,7 @@ pub fn run() -> i32 {
 
     let telemetry = std::thread::Builder::new()
         .name("telemetry".into())
-        .spawn(move || telemetry_loop(notifier));
+        .spawn(move || telemetry_loop(notifier, speed));
 
     if let Err(e) = telemetry {
         eprintln!("arbotray: cannot start telemetry thread: {e}");
@@ -61,7 +68,7 @@ pub fn run() -> i32 {
 /// for itself: tile visibility and the refresh period are only ever consulted
 /// here, so a captured copy would leave the file changed and the taskbar
 /// unchanged — the failure the Settings page exists to remove.
-fn telemetry_loop(notifier: crate::taskbar::Notifier) {
+fn telemetry_loop(notifier: crate::taskbar::Notifier, speed: SpeedTest) {
     let mut sampler = Sampler::new();
     let mut history: Vec<u64> = Vec::with_capacity(HISTORY_LEN);
     // Loaded once and carried across ticks: it accumulates deltas, so a fresh
@@ -94,6 +101,12 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier) {
         model.month_text = crate::telemetry::usage::format_size(usage.month_bytes());
         model.month_partial = !usage.covers_whole_month();
         model.usage_days = usage.history();
+        // The speed test's own state, folded in here like the usage counter
+        // above and for the same reason: a run outlives the sample it was
+        // started in, so it cannot be rebuilt from a metric. This is also what
+        // drives the page while a test runs — the worker thread has no window
+        // to invalidate, so the next tick is what shows its progress.
+        model.set_speed(&speed.snapshot());
 
         if let Some(net) = metric.net {
             if history.len() == HISTORY_LEN {

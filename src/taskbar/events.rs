@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::taskbar::icon::{self, CMD_OPEN, CMD_QUIT, Icon, show_menu};
 use crate::taskbar::render::Renderer;
 use crate::taskbar::{TrayModel, dock};
+use crate::telemetry::SpeedTest;
 use crate::ui;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,10 @@ pub struct WindowState {
     /// painting until the next launch — the file would change and the taskbar
     /// would not, which is the exact failure this whole feature exists to fix.
     pub telemetry: Arc<Mutex<Config>>,
+    /// The speed test, so the dashboard can start a run. This thread only ever
+    /// hands it to the dashboard — it does not read the results, which arrive
+    /// in the model through the telemetry thread's own clone of the handle.
+    pub speed: SpeedTest,
 }
 
 /// Window procedure for the docked tray child.
@@ -200,7 +205,13 @@ pub unsafe extern "system" fn wnd_proc(
 /// clicks, and an app that puts a window on screen before it is asked to is
 /// the reason people uninstall tray tools.
 fn open_dashboard(state: &mut WindowState) {
-    if let Some(hwnd) = ui::ensure(state.instance, &state.cfg, &state.model, state.ui) {
+    if let Some(hwnd) = ui::ensure(
+        state.instance,
+        &state.cfg,
+        &state.model,
+        state.ui,
+        state.speed.clone(),
+    ) {
         state.ui = hwnd;
         ui::show(hwnd);
     }

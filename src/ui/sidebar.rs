@@ -21,8 +21,8 @@
 use crate::ui::components::{draw, glyph, rounded_fill};
 use crate::ui::design::{ICON_COL, ITEM_H, RADIUS, S2, S3, page_icon, palette};
 use crate::ui::layout::{ROW_H, VALUE_OFFSET};
-use crate::ui::pages::{PAGES, SETTINGS};
-use crate::ui::settings::show_settings;
+use crate::ui::pages::PAGES;
+use crate::ui::settings::show_controls;
 use crate::ui::theme::{scale, sidebar_w};
 use crate::ui::UiState;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -73,7 +73,7 @@ pub(crate) fn select(hwnd: HWND, state: &mut UiState, page: usize) {
         return;
     }
     state.page = page;
-    show_settings(hwnd, page == SETTINGS);
+    show_controls(hwnd, page);
     // SAFETY: our own window, and an invalidation only asks for a repaint.
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);

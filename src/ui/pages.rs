@@ -9,12 +9,22 @@ use crate::taskbar::TrayModel;
 /// `Settings` is **appended**. These indices are positional, so inserting it
 /// anywhere but the end would renumber every page after it — the labels would
 /// still read correctly and the routing would be wrong.
-pub(crate) const PAGES: [&str; 5] = ["Overview", "Network", "System", "Data", "Settings"];
+pub(crate) const PAGES: [&str; 7] = [
+    "Overview",
+    "Network",
+    "System",
+    "Data",
+    "Ports",
+    "Speed Test",
+    "Settings",
+];
 pub(crate) const OVERVIEW: usize = 0;
 pub(crate) const NETWORK: usize = 1;
 pub(crate) const SYSTEM: usize = 2;
 pub(crate) const DATA: usize = 3;
-pub(crate) const SETTINGS: usize = 4;
+pub(crate) const PORTS: usize = 4;
+pub(crate) const SPEEDTEST: usize = 5;
+pub(crate) const SETTINGS: usize = 6;
 
 // --- pages ----------------------------------------------------------------
 
@@ -75,6 +85,24 @@ pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, St
             // recent past only, and "Month so far" says so where a reader will
             // actually look.
             push(month_label(model), &model.month_text);
+        }
+        // Ordered widest first: what the machine is listening on, then what is
+        // actually talking, then the connectionless sockets. The port list
+        // itself is drawn after these by the painter, because its labels are
+        // runtime port numbers rather than captions.
+        PORTS => {
+            push("Listening", &model.listeners_text);
+            push("Established", &model.established_text);
+            push("UDP bound", &model.udp_text);
+            push("Processes", &model.port_owners_text);
+        }
+        // The reading leads and the running state follows it, so the numbers a
+        // reader came for never move down the page when a test starts.
+        SPEEDTEST => {
+            push("Download", &model.speed_down_text);
+            push("Upload", &model.speed_up_text);
+            push("Latency", &model.speed_latency_text);
+            push("Status", &model.speed_phase_text);
         }
         // The Settings page has no metric on it: every line it shows is a
         // caption from `SET_ROW_LABELS` beside a control. Without this arm it
@@ -140,6 +168,17 @@ pub(crate) fn page_section(
         // list adds up to.
         DATA => match label {
             "Today" => Some("Totals"),
+            _ => None,
+        },
+        // Four counters of the same kind, so one heading rather than four
+        // captions: the open-port list below them is the detail this group is
+        // the summary of.
+        PORTS => match label {
+            "Listening" => Some("Sockets"),
+            _ => None,
+        },
+        SPEEDTEST => match label {
+            "Download" => Some("Result"),
             _ => None,
         },
         // OVERVIEW, and the fallback for an index that cannot happen — the same
@@ -258,6 +297,17 @@ mod tests {
             uptime_text: "3d 4h".into(),
             battery_text: "88%".into(),
             power_text: "Plugged in".into(),
+            // The two pages whose rows are all live readings rather than
+            // hardware facts: an empty model has neither, and the grouping
+            // checks below require every page to open under a heading.
+            listeners_text: "24".into(),
+            established_text: "87".into(),
+            udp_text: "31".into(),
+            port_owners_text: "42".into(),
+            speed_down_text: "94.2M/s".into(),
+            speed_up_text: "11.8M/s".into(),
+            speed_latency_text: "14ms".into(),
+            speed_phase_text: "Done".into(),
             ..Default::default()
         }
     }
@@ -314,6 +364,8 @@ mod tests {
             (SYSTEM, "Computername", "This machine"),
             (SYSTEM, "Battery", "Power"),
             (DATA, "Today", "Totals"),
+            (PORTS, "Listening", "Sockets"),
+            (SPEEDTEST, "Download", "Result"),
         ];
         for (page, label, name) in cases {
             // `prev: None` so the second of a doubled anchor still answers.
@@ -385,6 +437,8 @@ mod tests {
             vec!["Live", "Hardware", "This machine", "Power"]
         );
         assert_eq!(headings(DATA), vec!["Totals"]);
+        assert_eq!(headings(PORTS), vec!["Sockets"]);
+        assert_eq!(headings(SPEEDTEST), vec!["Result"]);
         // A heading over a single row is not a group, it is a caption: two
         // headings for two rows would be more furniture than content. The Data
         // page is the one exception — its day list gives "Totals" a second row

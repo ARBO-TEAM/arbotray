@@ -104,7 +104,7 @@ pub(crate) fn is_dark(cfg: &Config) -> bool {
 }
 
 /// `a` mixed toward `b` by `t` percent, per channel.
-fn mix(a: COLORREF, b: COLORREF, t: u32) -> COLORREF {
+pub(crate) fn mix(a: COLORREF, b: COLORREF, t: u32) -> COLORREF {
     let t = t.min(100);
     let ch = |shift: u32| {
         let (av, bv) = ((a.0 >> shift) & 0xFF, (b.0 >> shift) & 0xFF);
@@ -159,6 +159,10 @@ pub(crate) const ICON_NETWORK: u16 = 0xE774;
 pub(crate) const ICON_HARDWARE: u16 = 0xE9D9;
 pub(crate) const ICON_DATA: u16 = 0xE81C;
 pub(crate) const ICON_SETTINGS: u16 = 0xE713;
+/// An RJ45 plug, for the sockets page.
+pub(crate) const ICON_PORTS: u16 = 0xE968;
+/// A bolt, for the speed test.
+pub(crate) const ICON_SPEED: u16 = 0xE945;
 
 /// The glyph a sidebar entry leads with, by page index.
 pub(crate) fn page_icon(page: usize) -> u16 {
@@ -167,6 +171,8 @@ pub(crate) fn page_icon(page: usize) -> u16 {
         crate::ui::pages::NETWORK => ICON_NETWORK,
         crate::ui::pages::SYSTEM => ICON_HARDWARE,
         crate::ui::pages::DATA => ICON_DATA,
+        crate::ui::pages::PORTS => ICON_PORTS,
+        crate::ui::pages::SPEEDTEST => ICON_SPEED,
         crate::ui::pages::SETTINGS => ICON_SETTINGS,
         // Not reachable: the page is clamped to `PAGES` before it gets here.
         // The overview's glyph is a better answer than a blank column anyway.
@@ -400,3 +406,4 @@ mod tests {
         }
     }
 }
+

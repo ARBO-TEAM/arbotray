@@ -39,6 +39,19 @@ pub(crate) const SET_OPACITY: i32 = SET_ID_BASE + 15;
 pub(crate) const SET_SAVE: i32 = SET_ID_BASE + 16;
 pub(crate) const SET_RESET: i32 = SET_ID_BASE + 17;
 
+/// The Speed Test page's one control. It is not a Settings control and is never
+/// drawn with them — see `settings::show_controls` — but it shares their id
+/// space, because `WM_COMMAND` reaches the window as one stream and a second
+/// numbering scheme would only buy a range check.
+pub(crate) const SET_SPEED: i32 = SET_ID_BASE + 18;
+
+/// The Ports page's one control: end the process holding the selected port.
+///
+/// Its own id rather than a share of the Speed Test button's, and it shares the
+/// Settings page's numbering for the same reason that one does — one
+/// `WM_COMMAND` stream, one font sweep, one visibility function.
+pub(crate) const SET_STOP: i32 = SET_ID_BASE + 19;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings

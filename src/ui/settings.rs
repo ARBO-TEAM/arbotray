@@ -5,7 +5,8 @@ use crate::config::{
 };
 use crate::ui::consts::{
     BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_BG, SET_FG, SET_FONT, SET_INTERVAL,
-    SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, TILE_IDS, TILE_LABELS, WM_ENABLE,
+    SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, TILE_IDS,
+    TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
@@ -325,6 +326,15 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
+    // The Speed Test page's, and the one control here that does not belong to
+    // the Settings page. It shares the notification path all the same — one
+    // `WM_COMMAND` stream, one `SetFont` sweep — and is separated by its own
+    // function so the sweep that hides the page cannot take it with it.
+    create_control(parent, state, w!("BUTTON"), "Run test", button_style, SET_SPEED);
+    // The Ports page's, and the second control that belongs to another page.
+    // Same path, same separation: `show_controls` is the one place the split is
+    // spelled out.
+    create_control(parent, state, w!("BUTTON"), "Stop process", button_style, SET_STOP);
 
     write_form(parent, &state.cfg);
 }
@@ -476,9 +486,7 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         // The first row of controls sits one title-height below the page
         // heading, exactly where `paint` puts its first row — so the labels and
         // the controls that belong to them share a band.
-        let top = pad
-            + scale(TITLE_PAD + ROW_H + TITLE_EXTRA * 2, state.dpi)
-            + scale(VALUE_OFFSET, state.dpi);
+        let top = form_top(state.dpi);
         let _ = h;
 
         let field_w = scale(FIELD_W, state.dpi);
@@ -503,6 +511,28 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
             place(hwnd, id, left, y, width, ctl_h);
         }
 
+        // The two page-owned buttons, pinned to the foot of the content column
+        // rather than placed on a band. Everything above them on their own page
+        // belongs to the painter, and how much of it there is depends on the
+        // machine — a control on a band would end up underneath a row the
+        // moment the page grew one.
+        let foot = foot_button_top(h, state.dpi);
+        place(hwnd, SET_SPEED, x0, foot, field_w, ctl_h);
+        // Alongside the Run button rather than on top of it: the two belong to
+        // different pages and only one is ever shown, but both are placed on
+        // every layout, so they cannot share a rectangle.
+        place(hwnd, SET_STOP, x0 + field_w + gap, foot, field_w, ctl_h);
+        // A second run while one is in flight is refused by `SpeedTest::start`
+        // anyway; disabling it here is what says so before the click rather
+        // than after it. Refreshed per tick by `ui::update`, because the run
+        // that re-enables it ends on another thread.
+        set_enabled(hwnd, SET_SPEED, !state.model.speed_running);
+        // The same for the Stop button: nothing selected, nothing to stop. Its
+        // selection lives in `UiState` and can be cleared between two samples —
+        // by a click, or by the port simply closing — so this is refreshed per
+        // tick as well rather than only when the selection changes.
+        set_enabled(hwnd, SET_STOP, state.selected_port.is_some());
+
         for id in control_ids() {
             if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
                 SendMessageW(
@@ -516,10 +546,48 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
     }
 }
 
-/// Every control id the Settings page owns, in creation order.
+/// The band the form's first row sits on: one title-height below the page
+/// heading, which is exactly where `paint` puts its own first row, so a caption
+/// and the control beside it share a band.
+///
+/// Summed as three scaled terms rather than one scaled sum, and that is not
+/// incidental: `scale` truncates, so `scale(20) + scale(54) + scale(6)` and
+/// `scale(80)` differ by a pixel at some DPIs — a pixel of drift between a
+/// caption and its control, which is the one thing this function exists to
+/// prevent.
+pub(crate) fn form_top(dpi: u32) -> i32 {
+    scale(PAD, dpi)
+        + scale(TITLE_PAD + ROW_H + TITLE_EXTRA * 2, dpi)
+        + scale(VALUE_OFFSET, dpi)
+}
+
+/// Where a page's own action button sits: the foot of the content column, but
+/// never above the first band — a window shorter than its own content scrolls
+/// nothing, so the button would otherwise be drawn over the heading.
+///
+/// Shared by the two pages that own a control of their own, and exposed because
+/// their painters have to know it too. Both lists above these buttons are
+/// unbounded in a way no other page's content is — ten speed runs, twelve
+/// listening ports — and a list that grew into its button would leave the
+/// button unclickable rather than merely ugly. Two copies of this arithmetic
+/// would drift; one function is the only way a painter and its control agree on
+/// where the page ends.
+pub(crate) fn foot_button_top(h: i32, dpi: u32) -> i32 {
+    (h - scale(PAD, dpi) - scale(CTL_H, dpi)).max(form_top(dpi))
+}
+
+/// Every control the dashboard owns, in creation order.
+///
+/// Named for the Settings page because that is where all but one of them live:
+/// this is the list `layout_settings` hands the themed font to, and the one
+/// `show_controls` walks. It carries `SET_SPEED` too, because a control whose
+/// font this list forgot would render in the system face — which is not a
+/// failure anything else would catch.
 pub(crate) fn control_ids() -> Vec<i32> {
     let mut ids: Vec<i32> = TILE_IDS.to_vec();
     ids.extend(FIELD_ROWS.iter().map(|(id, _)| *id));
+    ids.push(SET_SPEED);
+    ids.push(SET_STOP);
     ids
 }
 
@@ -535,18 +603,37 @@ pub(crate) fn place(hwnd: HWND, id: i32, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-/// Show or hide the whole Settings page. Called when the page changes: the
-/// controls are clipped to their own rectangles by `WS_CLIPCHILDREN`, not to
-/// the page they belong to, so leaving them up would paint eight checkboxes
-/// over the sparkline on every other page.
-pub(crate) fn show_settings(hwnd: HWND, visible: bool) {
-    let flag = if visible { SW_SHOW } else { SW_HIDE };
+/// Show the page's one control, or hide it. Separate from the sweep below
+/// because the two changes at different times: the sweep is the Settings page
+/// being left, this is the Speed Test page being reached.
+///
+/// It exists at all because *every* control is a real child window and none of
+/// them is clipped to a page — `WS_CLIPCHILDREN` clips children to their own
+/// rectangles, not to a region the parent paints. So a control that is only
+/// hidden when its neighbour's page is left would sit on top of the dashboard
+/// for as long as the user stayed there.
+pub(crate) fn show_controls(hwnd: HWND, page: usize) {
+    let settings = page == crate::ui::pages::SETTINGS;
+    // The controls that belong to a page of their own, and the page each one
+    // belongs to. A table rather than a chain of `if`s: this is the one place
+    // the split between "the Settings page's controls" and "the rest" is
+    // written down, and a third page-owned control should be a row here rather
+    // than another branch in two places.
+    let elsewhere: [(i32, bool); 2] = [
+        (SET_SPEED, page == crate::ui::pages::SPEEDTEST),
+        (SET_STOP, page == crate::ui::pages::PORTS),
+    ];
     // SAFETY: every id names one of our own children; `ShowWindow` on a child
     // only changes its visibility.
     unsafe {
         for id in control_ids() {
+            let owned = elsewhere.iter().find(|(own, _)| *own == id);
+            let show = match owned {
+                Some((_, visible)) => *visible,
+                None => settings,
+            };
             if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
-                let _ = ShowWindow(ctl, flag);
+                let _ = ShowWindow(ctl, if show { SW_SHOW } else { SW_HIDE });
             }
         }
     }

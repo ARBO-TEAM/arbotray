@@ -7,24 +7,30 @@
 //! and the Settings captions have to sit on the bands that `layout_settings`
 //! put the controls on.
 
-use crate::taskbar::render::sparkline_points;
 use crate::ui::components::{Canvas, Fonts};
-use crate::ui::design::palette;
+use crate::ui::design::{S3, palette};
 use crate::ui::pages::{
-    DATA, PAGES, SETTINGS, SYSTEM, page_rows, page_section, page_shows_graph, usage_rows,
+    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, SYSTEM, page_rows, page_section, page_shows_graph,
+    usage_rows,
 };
-use crate::ui::settings::SET_ROW_LABELS;
+use crate::ui::settings::{SET_ROW_LABELS, foot_button_top};
 use crate::ui::theme::scale;
 use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState};
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject,
-    HGDIOBJ, NULL_BRUSH, PS_SOLID, Polyline, ReleaseDC, SelectObject, SetBkMode, TRANSPARENT,
+    CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject, HGDIOBJ,
+    NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-/// Draw one frame: background, sidebar, heading, the page's rows, sparkline.
-pub(crate) fn paint(hwnd: HWND, state: &UiState) {
+/// Draw one frame: background, sidebar, heading, the page's rows, chart, and
+/// the confirmation popup if one is up.
+///
+/// `&mut` for one reason: the Ports page's rows are laid out here and hit-
+/// tested in the window procedure, so their bands are recorded as they are
+/// drawn. The alternative — the click path re-deriving the same sums — is two
+/// answers to one question, which is the bug this avoids by construction.
+pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
     // SAFETY: every GDI object created here is deleted before returning or
     // selected back out into the DC it came from, and the DC is released.
     unsafe {
@@ -145,6 +151,94 @@ pub(crate) fn paint(hwnd: HWND, state: &UiState) {
             }
         }
 
+        // The Ports page's open-port list, under the four counters that summarise
+        // it. Its rows carry runtime port numbers rather than captions, so they
+        // come through here like the day list above. `section` claims a band of
+        // its own, which is safe on this page: the last `heading_row` above is
+        // on the counter row *before* this caption, and only a heading drawn on
+        // the same band could collide with it.
+        //
+        // The rows are also the page's selection: clicking one aims the Stop
+        // button at the process holding it, so their bands are recorded here
+        // rather than recomputed by the click path.
+        state.port_rows.clear();
+        if page == PORTS {
+            // The Stop button is pinned to the foot, so the list has to stop
+            // above it — twelve ports plus four counters is taller than a short
+            // window, and a row drawn under the button is a row that cannot be
+            // clicked.
+            let limit = foot_button_top(h, state.dpi) - scale(S3, state.dpi);
+            if state.model.open_ports.is_empty() {
+                c.empty("No listening ports were found.");
+            } else if c.y() + row_h * 2 <= limit {
+                c.section("Open ports");
+                // Borrowed from the model and pushed to the state's own list in
+                // the same loop: disjoint fields of one struct, so the borrow
+                // checker has no argument with it.
+                for entry in &state.model.open_ports {
+                    if c.y() + row_h > limit {
+                        break;
+                    }
+                    let top = c.y();
+                    state.port_rows.push(RECT {
+                        left: x0,
+                        top,
+                        right: x1,
+                        bottom: top + row_h,
+                    });
+                    if state.selected_port == Some(entry.pid) {
+                        // Behind the text, not around it: a ring drawn after the
+                        // row would clip the descenders of its own label.
+                        c.pill();
+                    }
+                    c.row(&entry.port, &entry.owner);
+                }
+            }
+            // What the last stop did, under the list. A failed one is the
+            // expected case rather than the strange one — an unelevated process
+            // cannot end a service — so it is a sentence, not an alarm.
+            if let Some(notice) = &state.port_notice {
+                let colour = if notice.starts_with("stopped") {
+                    pal.muted
+                } else {
+                    pal.danger
+                };
+                c.note(notice, colour);
+            }
+        }
+
+        // The Speed Test page, above the Run button pinned to the foot of the
+        // column. Everything here is conditional on a run having happened, so
+        // the rows would otherwise rearrange themselves under the reader's eyes
+        // — the price of the button being placed rather than laid out in this
+        // list. Nothing may be drawn past the button's own top, which is why
+        // the history list is trimmed to the room left rather than allowed to
+        // run under it.
+        if page == SPEEDTEST {
+            let limit = foot_button_top(h, state.dpi) - scale(S3, state.dpi);
+            if state.model.speed_running {
+                let pct = state.model.speed_percent.min(100);
+                c.progress("Progress", &format!("{pct}%"), pct);
+            }
+            // A failure is a row, not a footnote: it is the result of the run,
+            // and it is the thing the reader opened the page to find out.
+            if !state.model.speed_error_text.is_empty() {
+                c.note(&state.model.speed_error_text, pal.danger);
+            }
+            // The caption claims a band of its own before its first row, so the
+            // check has to cover both or a caption would be left standing with
+            // no list under it.
+            if !state.model.speed_history.is_empty() && c.y() + row_h * 2 <= limit {
+                c.section("History");
+                for (when, result) in &state.model.speed_history {
+                    if c.y() + row_h > limit {
+                        break;
+                    }
+                    c.row(when, result);
+                }
+            }
+        }
+
         // The Settings page's captions. They sit on the same bands as the
         // controls `layout_settings` places, from the same constants, so a row
         // and its caption cannot drift even though two functions draw them.
@@ -172,29 +266,33 @@ pub(crate) fn paint(hwnd: HWND, state: &UiState) {
             }
         }
 
-        // The sparkline fills whatever room is left, so the picture grows with
-        // the window instead of sitting in a fixed corner.
+        // The chart fills whatever room is left, so the picture grows with the
+        // window instead of sitting in a fixed corner. It decides for itself
+        // whether the rectangle is big enough once its gutter and its time strip
+        // are taken out of it, which is a question only it can answer.
         let spark_gap = scale(SPARK_GAP, state.dpi);
         let spark_top = c.y() + spark_gap;
-        let spark_w = x1 - x0;
         let spark_h = h - spark_gap - pad - spark_top;
-        if page_shows_graph(page) && spark_h >= 8 && spark_w > 0 && !state.model.history.is_empty() {
-            let points = sparkline_points(&state.model.history, spark_w, spark_h);
-            if points.len() > 1 {
-                let moved: Vec<POINT> = points
-                    .into_iter()
-                    .map(|p| POINT {
-                        x: p.x + x0,
-                        y: p.y + spark_top,
-                    })
-                    .collect();
-                let pen = CreatePen(PS_SOLID, 1, pal.text);
-                let old = SelectObject(dc, HGDIOBJ(pen.0));
-                let _ = Polyline(dc, &moved);
-                SelectObject(dc, old);
-                let _ = DeleteObject(HGDIOBJ(pen.0));
-            }
+        if page_shows_graph(page) && spark_h > 0 && x1 > x0 {
+            crate::ui::chart::paint(
+                &c,
+                RECT {
+                    left: x0,
+                    top: spark_top,
+                    right: x1,
+                    bottom: spark_top + spark_h,
+                },
+                &state.model.history,
+                state.cfg.interval_ms,
+                state.dpi,
+            );
         }
+
+        // The confirmation popup, last and over everything. It dims the whole
+        // client area rather than the content column, because the sidebar is
+        // part of what the popup is standing in front of — and a modal that
+        // leaves its own window's navigation clickable is not modal.
+        crate::ui::modal::paint(dc, &rect, &state.modal, &fonts, &pal, state.dpi);
 
         // Leave the DC holding stock objects rather than ours.
         SelectObject(dc, GetStockObject(NULL_BRUSH));
