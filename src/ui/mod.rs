@@ -1440,6 +1440,33 @@ mod tests {
     }
 
     #[test]
+    fn the_initial_height_opens_with_room_for_the_last_settings_row() {
+        // The Settings page is the tallest, and its last row is placed from the
+        // row table rather than pinned to the foot — so a row added without
+        // `START_H` moving would open the window with that field under the
+        // frame's edge, and nothing else would notice.
+        let last = form_top(96) + ROW_H * ROW_SAVE as i32;
+        assert!(
+            last + ROW_H < START_H,
+            "START_H {START_H} leaves the last row ({last}) no room"
+        );
+    }
+
+    #[test]
+    fn every_settings_row_has_a_caption_on_its_own_band() {
+        // The captions are painted in order beside controls placed by row
+        // index, so the two only agree while every row index below the count
+        // is used by exactly the controls `FIELD_ROWS` gives it.
+        for (id, row) in FIELD_ROWS {
+            assert!(row < SET_ROW_COUNT, "control {id} is off the page");
+            assert!(
+                !SET_ROW_LABELS[row].is_empty(),
+                "control {id} sits on a band with no caption"
+            );
+        }
+    }
+
+    #[test]
     fn scaled_metrics_never_collapse_to_nothing() {
         assert_eq!(scale(SIDEBAR_W, 96), SIDEBAR_W);
         assert_eq!(scale(SIDEBAR_W, 144), 225);
