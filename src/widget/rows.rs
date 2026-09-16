@@ -99,8 +99,13 @@ pub fn rows(model: &TrayModel, w: &Widget) -> Vec<Row> {
             b.push(Row::item("CPU", &model.cpu_text));
         }
         if !model.ram_text.is_empty() {
-            b.push(Row::item("Memory", &model.ram_text));
+            b.push(Row::item("RAM", &model.ram_text));
         }
+        push(&mut out, "Usage", b);
+    }
+
+    if w.show.sensors {
+        let mut b = Vec::new();
         if !model.gpu_text.is_empty() {
             b.push(Row::item("GPU", &model.gpu_text));
         }
@@ -110,7 +115,7 @@ pub fn rows(model: &TrayModel, w: &Widget) -> Vec<Row> {
         if !model.power_text.is_empty() {
             b.push(Row::item("Power", &model.power_text));
         }
-        push(&mut out, "Hardware", b);
+        push(&mut out, "Sensors", b);
     }
 
     if w.show.network {
@@ -217,6 +222,23 @@ mod tests {
     use super::*;
     use crate::config;
 
+    /// Every block switched on, so a test that is about a *row* is not silently
+    /// testing which blocks the defaults happen to include.
+    fn all() -> config::Widget {
+        config::Widget {
+            show: config::WidgetShow {
+                net: true,
+                latency: true,
+                hardware: true,
+                sensors: true,
+                network: true,
+                usage: true,
+                system: true,
+            },
+            ..Default::default()
+        }
+    }
+
     fn model() -> TrayModel {
         TrayModel {
             down_text: "1.2M/s".into(),
@@ -239,11 +261,31 @@ mod tests {
     #[test]
     fn every_block_is_switched_by_its_own_flag() {
         let m = model();
-        let mut w = config::Widget::default();
+        let mut w = all();
         assert!(!rows(&m, &w).is_empty());
         w.show.net = false;
         assert!(!rows(&m, &w).iter().any(|r| r.value == "Traffic"));
-        assert!(rows(&m, &w).iter().any(|r| r.value == "Hardware"));
+        assert!(rows(&m, &w).iter().any(|r| r.value == "Usage"));
+    }
+
+    #[test]
+    fn the_default_panel_is_traffic_and_usage_and_nothing_else() {
+        // The whole shape of the panel in one assertion: four rows, two
+        // headings, and not one row of page detail. This is the measure of
+        // "small enough to leave on the desktop".
+        let rs = rows(&model(), &config::Widget::default());
+        let headings: Vec<_> = rs
+            .iter()
+            .filter(|r| r.role == Role::Title)
+            .map(|r| r.value.as_str())
+            .collect();
+        assert_eq!(headings, ["Traffic", "Usage"]);
+        let labels: Vec<_> = rs
+            .iter()
+            .filter(|r| !r.label.is_empty())
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(labels, ["Download", "Upload", "CPU", "RAM"]);
     }
 
     #[test]
@@ -251,16 +293,32 @@ mod tests {
         // The battery is the case that matters: most desktops report none, and
         // an empty "Battery" row is the panel admitting it looked.
         let m = model();
-        let w = config::Widget::default();
+        let w = all();
         assert!(!rows(&m, &w).iter().any(|r| r.label == "Battery"));
         assert!(rows(&m, &w).iter().any(|r| r.label == "CPU"));
+    }
+
+    #[test]
+    fn sensors_are_their_own_block_so_cpu_and_ram_stand_alone() {
+        // A machine that reports a GPU must not drag one into the block the
+        // default panel is built from — that is the whole reason the split
+        // exists.
+        let m = TrayModel {
+            gpu_text: "7%".into(),
+            cpu_text: "12%".into(),
+            ram_text: "43%".into(),
+            ..Default::default()
+        };
+        let rs = rows(&m, &config::Widget::default());
+        assert!(!rs.iter().any(|r| r.label == "GPU"));
+        assert!(rows(&m, &all()).iter().any(|r| r.label == "GPU"));
     }
 
     #[test]
     fn an_over_quota_total_is_the_only_alert_row() {
         let mut m = model();
         m.quota_alert = true;
-        let rs = rows(&m, &config::Widget::default());
+        let rs = rows(&m, &all());
         let alerts: Vec<_> = rs.iter().filter(|r| r.role == Role::Alert).collect();
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].label, "Today");
@@ -269,7 +327,7 @@ mod tests {
     #[test]
     fn an_empty_model_makes_an_empty_panel() {
         // Not a column of headings over nothing.
-        let rs = rows(&TrayModel::default(), &config::Widget::default());
+        let rs = rows(&TrayModel::default(), &all());
         assert!(rs.is_empty(), "got {rs:?}");
     }
 
@@ -279,7 +337,7 @@ mod tests {
             gpu_text: "7%".into(),
             ..Default::default()
         };
-        let rs = rows(&m, &config::Widget::default());
+        let rs = rows(&m, &all());
         assert_eq!(rs[0].role, Role::Title);
         assert!(rs.len() > 1, "a heading with no rows must not be emitted");
     }
@@ -290,7 +348,7 @@ mod tests {
         m.month_text = "41.2G".into();
         m.month_partial = true;
         assert!(
-            rows(&m, &config::Widget::default())
+            rows(&m, &all())
                 .iter()
                 .any(|r| r.label == "This month (so far)")
         );
@@ -300,15 +358,12 @@ mod tests {
     fn every_block_in_a_full_model_is_reachable() {
         // Guards the wiring, not the formatting: a block behind the wrong flag
         // or a row behind the wrong field would silently never appear.
-        let mut w = config::Widget::default();
-        w.show.net = true;
-        w.show.latency = true;
-        w.show.hardware = true;
-        w.show.network = true;
-        w.show.usage = true;
-        w.show.system = true;
-        let rs = rows(&model(), &w);
-        for heading in ["Traffic", "Latency", "Hardware", "Network", "Data", "System"] {
+        let mut m = model();
+        m.gpu_text = "7%".into();
+        let rs = rows(&m, &all());
+        for heading in [
+            "Traffic", "Latency", "Usage", "Sensors", "Network", "Data", "System",
+        ] {
             assert!(
                 rs.iter().any(|r| r.role == Role::Title && r.value == heading),
                 "missing {heading}"

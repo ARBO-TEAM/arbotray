@@ -40,11 +40,12 @@ pub const DEFAULT_JSON: &str = r##"{
     "enabled": false,
     "show": {
       "net": true,
-      "latency": true,
+      "latency": false,
       "hardware": true,
-      "network": true,
-      "usage": true,
-      "system": true
+      "sensors": false,
+      "network": false,
+      "usage": false,
+      "system": false
     },
     "x": null,
     "y": null,
@@ -99,6 +100,11 @@ pub struct Widget {
 /// Which blocks the widget draws. Coarser than `Show`: a panel big enough to
 /// hold labelled rows does not want eight independent switches for them, so
 /// these group the rows the way the pages already do.
+///
+/// Only two of them are on by default — traffic and CPU/RAM, the readings that
+/// change while you watch. The rest are page detail that happens to be reachable
+/// from the desktop, and a panel with all seven blocks in it is a window, not
+/// something you glance at.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetShow {
@@ -106,8 +112,13 @@ pub struct WidgetShow {
     pub net: bool,
     /// Gateway and internet round-trip.
     pub latency: bool,
-    /// CPU, RAM, GPU, battery.
+    /// CPU and RAM.
     pub hardware: bool,
+    /// GPU, battery and power, when the machine reports them. Split out from
+    /// `hardware` rather than folded in with it because these are the readings
+    /// that are absent on most machines and merely interesting on the rest —
+    /// keeping them here is what leaves "CPU and RAM" meaning exactly that.
+    pub sensors: bool,
     /// Adapter, address, gateway, DNS, Wi-Fi.
     pub network: bool,
     /// Today, this month, and the last few days.
@@ -132,11 +143,12 @@ impl Default for WidgetShow {
     fn default() -> Self {
         Self {
             net: true,
-            latency: true,
+            latency: false,
             hardware: true,
-            network: true,
-            usage: true,
-            system: true,
+            sensors: false,
+            network: false,
+            usage: false,
+            system: false,
         }
     }
 }

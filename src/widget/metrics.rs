@@ -7,19 +7,22 @@
 //! paint path.
 
 /// Padding inside the panel, and the air between two blocks.
-pub const PAD: i32 = 14;
-pub const BLOCK_GAP: i32 = 10;
+pub const PAD: i32 = 9;
+pub const BLOCK_GAP: i32 = 6;
 /// How much taller a line is than the text in it.
-pub const LINE_GAP: i32 = 4;
+pub const LINE_GAP: i32 = 2;
 /// The gap between the label column and its values.
-pub const COL_GAP: i32 = 12;
+pub const COL_GAP: i32 = 10;
 /// Side of the close box, and its inset from the top-right corner.
-pub const CLOSE: i32 = 18;
-pub const CLOSE_INSET: i32 = 8;
+pub const CLOSE: i32 = 14;
+pub const CLOSE_INSET: i32 = 5;
 /// Distance a first-run panel keeps from the work area's edges.
-pub const MARGIN: i32 = 24;
+pub const MARGIN: i32 = 16;
 
 /// The panel is read at arm's length rather than glanced at beside a clock, so
-/// its body text is this many points above the strip's, and its headings more.
-pub const BODY_EXTRA: u32 = 2;
-pub const TITLE_EXTRA: u32 = 5;
+/// its body text sits this many points above the strip's — and its headings one
+/// more than that. Kept small on purpose: the panel is meant to be a corner of
+/// the desktop you can read at a glance, not a window, and every point added
+/// here is height taken from whatever it is covering.
+pub const BODY_EXTRA: u32 = 1;
+pub const TITLE_EXTRA: u32 = 2;
