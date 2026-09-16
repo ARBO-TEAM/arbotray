@@ -205,4 +205,20 @@ mod tests {
         // the stock icon, which looks like the resource simply did not load.
         assert_eq!(ICON_RESOURCE, 1);
     }
+
+    #[test]
+    fn the_buffer_the_tooltip_is_fitted_to_is_the_one_it_is_written_into() {
+        // Two files, one number: `TrayModel::tooltip` fits to `TOOLTIP_UNITS`
+        // and this writes into `szTip`. `szTip` is followed immediately by
+        // `dwState`, so the distance to it is the field's real width — and if it
+        // ever moves, the fit has to move with it. A silent truncation is the
+        // failure neither side would notice.
+        assert_eq!(
+            core::mem::offset_of!(NOTIFYICONDATAW, dwState)
+                - core::mem::offset_of!(NOTIFYICONDATAW, szTip),
+            (crate::taskbar::TOOLTIP_UNITS + 1) * size_of::<u16>(),
+            "szTip is no longer {} units",
+            crate::taskbar::TOOLTIP_UNITS + 1
+        );
+    }
 }

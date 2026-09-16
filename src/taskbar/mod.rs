@@ -365,24 +365,78 @@ impl TrayModel {
             .collect();
     }
 
-    /// Hover text for the tray icon.
+    /// Hover text for the tray icon: one labelled line per reading.
     ///
-    /// The topic is the one thing the taskbar has no room for: the network
-    /// name. `szTip` renders newlines as line breaks and has no other
-    /// formatting, and the buffer is fixed-size, so the caller truncates.
+    /// `szTip` is plain text — newlines are line breaks and there is no other
+    /// formatting, so a glyph in the string is the only icon this can carry and
+    /// the face is the system's to choose. What it *can* do is say what each
+    /// number is, which is the part the old run of bare values left the reader
+    /// to guess. The download and upload rates lead, each with an arrow, because
+    /// run together they are two numbers to tell apart at a glance — and telling
+    /// them apart is the reason to hover at all.
+    ///
+    /// Every field is read through the same emptiness the strip filters on, so a
+    /// tile switched off is absent here too: `from_metric` leaves those strings
+    /// empty, which is what `render::visible_segments` drops.
+    ///
+    /// The order is deliberate, and the fit depends on it. The two rates lead
+    /// under arrows, then the network they are leaving by — the name is what the
+    /// taskbar has no room for, so it is the last thing that may be dropped, not
+    /// the first. The health and usage readings follow it.
+    ///
+    /// The lines are **fitted, never truncated**. The buffer holds
+    /// `TOOLTIP_UNITS`, and the fullest possible model is a few units over it,
+    /// so something has to give. It gives at the *end*, where the least
+    /// load-bearing reading is; a rate cut in half says something false, so no
+    /// line is ever clipped to fit.
     pub fn tooltip(&self) -> String {
-        let mut tip = String::from("ArboTray");
-        let metrics = render::visible_segments(self).join("  ");
-        if !metrics.is_empty() {
-            tip.push('\n');
-            tip.push_str(&metrics);
-        }
+        // First, because it is what says which app this icon is.
+        let mut lines: Vec<String> = vec!["ArboTray".to_string()];
+        let mut add = |label: &str, value: &str| {
+            if !value.is_empty() {
+                lines.push(format!("{label}: {value}"));
+            }
+        };
+        add("\u{2193} Download", &self.down_text);
+        add("\u{2191} Upload", &self.up_text);
         if let Some(name) = &self.wifi_name {
-            tip.push_str("\nWiFi: ");
-            tip.push_str(name);
+            add("Network", name);
         }
-        tip
+        add("Latency", &self.latency_text);
+        add("CPU", &self.cpu_text);
+        add("RAM", &self.ram_text);
+        add("Wi-Fi", &self.wifi_text);
+        add("Data", &self.usage_text);
+
+        // Fitted from the end until the whole thing is inside the buffer.
+        // `ArboTray` alone is the floor — eight units against a 127-unit budget,
+        // so this always terminates with something left.
+        while lines.len() > 1 && tooltip_units(&lines) > TOOLTIP_UNITS {
+            lines.pop();
+        }
+        lines.join("\n")
     }
+}
+
+/// The `szTip` buffer's usable width in UTF-16 units, terminator excluded.
+///
+/// The buffer is 128 units and `write_tip` reserves one for the NUL, so this is
+/// the number of units a tooltip may actually occupy. Named here rather than
+/// spelled at the call site so the fit and the copy cannot disagree.
+pub const TOOLTIP_UNITS: usize = 127;
+
+/// What `lines` costs once joined with newlines, in UTF-16 units.
+///
+/// Units, not chars: `szTip` is a `[u16; 128]`, and the arrows above are above
+/// the Latin-1 range. They are still one unit each, but a non-BMP character
+/// would be two and counting them as one would overflow the buffer by exactly
+/// the amount nobody would think to test.
+fn tooltip_units(lines: &[String]) -> usize {
+    let text: usize = lines
+        .iter()
+        .map(|l| l.encode_utf16().count())
+        .sum();
+    text + lines.len().saturating_sub(1)
 }
 
 /// Dotted-quad for an address that arrived from Win32 as a `u32`.
@@ -602,5 +656,131 @@ mod tests {
         let cfg = Config::default();
         let m = Metric::default();
         assert_eq!(TrayModel::from_metric(&m, &cfg).latency_text, "--");
+    }
+
+    /// Every reading on the tooltip's own model, so a fit test has the widest
+    /// input the app can actually produce rather than a convenient handful.
+    fn widest() -> TrayModel {
+        TrayModel {
+            down_text: "999.9M/s".into(),
+            up_text: "999.9M/s".into(),
+            latency_text: "9999ms".into(),
+            cpu_text: "100%".into(),
+            ram_text: "100%".into(),
+            wifi_text: "6G 100%".into(),
+            usage_text: "9999.9G".into(),
+            wifi_name: Some("HomeNet".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Everything switched on with ordinary readings — the tooltip a user
+    /// actually sees, as opposed to `widest`'s upper bound on one.
+    fn typical() -> TrayModel {
+        TrayModel {
+            down_text: "1.4M/s".into(),
+            up_text: "0.2M/s".into(),
+            latency_text: "8ms".into(),
+            cpu_text: "12%".into(),
+            ram_text: "44%".into(),
+            wifi_text: "5G 78%".into(),
+            usage_text: "1.4G".into(),
+            wifi_name: Some("HomeNet".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_tooltip_names_each_reading_and_arrows_the_rates() {
+        // The whole point of the change: a reader should not have to know that
+        // the first number is download and the second is upload.
+        let tip = typical().tooltip();
+        assert_eq!(
+            tip,
+            "ArboTray\n\
+             \u{2193} Download: 1.4M/s\n\
+             \u{2191} Upload: 0.2M/s\n\
+             Network: HomeNet\n\
+             Latency: 8ms\n\
+             CPU: 12%\n\
+             RAM: 44%\n\
+             Wi-Fi: 5G 78%\n\
+             Data: 1.4G"
+        );
+    }
+
+    #[test]
+    fn the_tooltip_fits_at_ordinary_readings_without_dropping_anything() {
+        // The fit must not be doing work in the case people are actually in:
+        // a dropped line every time the numbers got to four digits would make
+        // the whole tooltip unreliable. Only `widest` is allowed to overflow.
+        assert!(tooltip_units(&typical().tooltip().lines().map(str::to_string).collect::<Vec<_>>())
+            <= TOOLTIP_UNITS);
+        assert_eq!(typical().tooltip().lines().count(), 9);
+    }
+
+    #[test]
+    fn the_tooltip_shows_a_switched_off_tile_no_more_than_the_strip_does() {
+        // `from_metric` leaves a disabled tile empty, and that emptiness is the
+        // only gate either surface has. A label here with no reading behind it
+        // would be a row the user cannot switch off.
+        let model = TrayModel {
+            down_text: "1.4M/s".into(),
+            ..Default::default()
+        };
+        let tip = model.tooltip();
+        assert_eq!(tip, "ArboTray\n\u{2193} Download: 1.4M/s");
+    }
+
+    #[test]
+    fn a_long_network_name_is_dropped_rather_than_clipping_a_reading() {
+        // The fit is the reason this function is not a join: the buffer is
+        // fixed, and an SSID that overran it would take a digit off whichever
+        // line happened to be last. The rates have to survive the name.
+        let model = TrayModel {
+            wifi_name: Some("w".repeat(400)),
+            ..widest()
+        };
+        let tip = model.tooltip();
+        assert!(
+            !tip.contains("Network:"),
+            "a name that does not fit is dropped, not cut: {tip}"
+        );
+        assert!(tip.contains("\u{2193} Download: 999.9M/s"), "{tip}");
+        assert!(tip.contains("\u{2191} Upload: 999.9M/s"), "{tip}");
+    }
+
+    #[test]
+    fn a_full_tooltip_gives_up_its_least_load_bearing_line_first() {
+        // The widest model the app can produce is a few units over the buffer,
+        // so exactly one line has to go. It has to be the reading at the end,
+        // never the network name: the name is the one field the taskbar has no
+        // room for, and it is why anyone hovers at all.
+        let tip = widest().tooltip();
+        assert!(tip.contains("Network: HomeNet"), "{tip}");
+        assert!(!tip.contains("Data:"), "the tail is what gives way: {tip}");
+    }
+
+    #[test]
+    fn the_tooltip_always_fits_the_buffer_it_is_written_into() {
+        // `write_tip` truncates silently and `szTip` is 128 units, so this is
+        // the property the fit loop exists to hold — asserted against the same
+        // constant the loop uses, and across every name length rather than one
+        // that happens to sit just inside the boundary.
+        for len in 0..300 {
+            let model = TrayModel {
+                wifi_name: Some("x".repeat(len)),
+                ..widest()
+            };
+            let tip = model.tooltip();
+            let units: usize = tip.encode_utf16().count();
+            assert!(
+                units <= TOOLTIP_UNITS,
+                "{len}-char name produced {units} units: {tip}"
+            );
+            // And whatever survived is whole lines, never a half line.
+            assert!(!tip.ends_with('\n'), "blank last line from a bad fit");
+            assert_eq!(tip.lines().count(), tip.matches('\n').count() + 1);
+        }
     }
 }
