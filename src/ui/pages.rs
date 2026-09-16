@@ -94,20 +94,69 @@ pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, St
     out
 }
 
-/// The group a System-page row opens, or `None` for a row that continues the
-/// group above it.
+/// The heading a row opens, or `None` for a row that continues the group above
+/// it.
 ///
-/// Ten label-value pairs with no grouping is a wall, and the wall is what made
-/// the detail feel like a dump rather than a page. Each group is anchored on its
-/// own first row, so a group whose first row is switched off simply has no
-/// header instead of leaving one hanging over unrelated rows.
-pub(crate) fn system_section(label: &str) -> Option<&'static str> {
-    match label {
-        "CPU" => Some("Live"),
-        "Processor" => Some("Hardware"),
-        "Computername" => Some("This machine"),
-        "Battery" => Some("Power"),
-        _ => None,
+/// A metric page is a wall of label-value pairs, and ten of them with nothing
+/// between them is a wall ten rows tall. Grouping turns each page into a few
+/// short blocks — and it costs nothing, because a heading is drawn *at* the row
+/// it names rather than above it. Nothing moves, so the order a page reads in
+/// cannot change because of where a caption went.
+///
+/// Each group is anchored on its own first row, so a group whose first row is
+/// switched off — or blank, because the collector had nothing to say — has no
+/// header at all, rather than leaving one hanging over unrelated rows.
+///
+/// `prev` is the heading the page has already drawn, and is what lets **two**
+/// rows open one group: the SSID row and the adapter row both begin
+/// "Connection", and which of them is present depends on whether the machine is
+/// on Wi-Fi. Whichever comes first draws the heading and the other continues
+/// the group it opened; without this the same heading would be drawn on two
+/// adjacent rows.
+pub(crate) fn page_section(
+    page: usize,
+    label: &str,
+    prev: Option<&'static str>,
+) -> Option<&'static str> {
+    let name = match page {
+        NETWORK => match label {
+            // Both open "Connection", deliberately — see above.
+            "Network" | "Adapter" => Some("Connection"),
+            "Wi-Fi" => Some("Signal"),
+            "Download" => Some("Traffic"),
+            "Gateway" => Some("Health"),
+            _ => None,
+        },
+        SYSTEM => match label {
+            "CPU" => Some("Live"),
+            "Processor" => Some("Hardware"),
+            "Computername" => Some("This machine"),
+            "Battery" => Some("Power"),
+            _ => None,
+        },
+        // The day list under these two has a standalone caption of its own
+        // (`"Recent days"`, in the painter), because its rows are runtime dates
+        // rather than page rows. This is the level above it: the totals the
+        // list adds up to.
+        DATA => match label {
+            "Today" => Some("Totals"),
+            _ => None,
+        },
+        // OVERVIEW, and the fallback for an index that cannot happen — the same
+        // split the row function makes, for the same reason.
+        _ => match label {
+            "Download" => Some("Traffic"),
+            "CPU" => Some("Usage"),
+            _ => None,
+        },
+    };
+    // A heading already drawn on the row above is a continuation, not a new
+    // group. The only table with two anchors for one name needs this; keeping
+    // the rule here rather than in each table means the next one cannot forget
+    // it and silently draw the same caption on two adjacent rows.
+    match name {
+        Some(n) if prev == Some(n) => None,
+        other => other,
     }
 }
 
@@ -153,15 +202,54 @@ pub(crate) fn page_shows_graph(page: usize) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_system_group_is_anchored_on_a_row_that_exists() {
-        // The anchors in `system_section` are strings, and a typo in one is a
-        // group header that silently never draws — the rows still appear, just
-        // with no heading over them, which looks like a missing feature rather
-        // than a misspelled literal.
-        let model = crate::taskbar::TrayModel {
+    /// Walk a page the way the painter does — threading the last heading drawn
+    /// into the next `page_section` — and return the pairs the painter would
+    /// draw, as `(Option<heading>, label)`.
+    fn painted(
+        page: usize,
+        model: &crate::taskbar::TrayModel,
+    ) -> Vec<(Option<&'static str>, &'static str)> {
+        let mut drawn: Option<&'static str> = None;
+        page_rows(page, model)
+            .into_iter()
+            .map(|(label, _)| {
+                let head = page_section(page, label, drawn);
+                if head.is_some() {
+                    drawn = head;
+                }
+                (head, label)
+            })
+            .collect()
+    }
+
+    /// The headings a page ends up with, in the order it draws them. This is
+    /// the check that the `prev` rule works: the two `Connection` anchors must
+    /// collapse to one heading when both rows are present.
+    fn headings(page: usize) -> Vec<&'static str> {
+        painted(page, &full())
+            .into_iter()
+            .filter_map(|(head, _)| head)
+            .collect()
+    }
+
+    /// A model with every field filled, so a page's own ordering shows.
+    fn full() -> crate::taskbar::TrayModel {
+        crate::taskbar::TrayModel {
+            down_text: "1.4M/s".into(),
+            up_text: "0.2M/s".into(),
+            latency_text: "8ms".into(),
             cpu_text: "10%".into(),
             ram_text: "40%".into(),
+            gateway_text: "192.168.1.1".into(),
+            internet_text: "14ms".into(),
+            loss_text: "0%".into(),
+            wifi_text: "5G 78%".into(),
+            wifi_name: Some("HomeNet".into()),
+            adapter_text: "Wi-Fi".into(),
+            ip_text: "192.168.1.10".into(),
+            dns_text: "192.168.1.1, 8.8.8.8".into(),
+            usage_text: "1.4G".into(),
+            month_text: "41.2G".into(),
             cpu_name_text: "AMD Ryzen 5 7600 6-Core Processor".into(),
             cores_text: "6 cores / 12 threads".into(),
             gpu_text: "AMD Radeon RX 6600".into(),
@@ -171,17 +259,101 @@ mod tests {
             battery_text: "88%".into(),
             power_text: "Plugged in".into(),
             ..Default::default()
+        }
+    }
+
+    /// The anchor tables are string matches, and a typo in one is a heading that
+    /// silently never draws — the rows still appear, just ungrouped, which looks
+    /// like a missing feature rather than a misspelled literal.
+    ///
+    /// The labels themselves are pinned exactly by the ordering tests in
+    /// `ui::tests`, so between them a renamed row fails there and a renamed
+    /// anchor fails here. What is checked here is the shape the headings have to
+    /// keep: every page grouped, no heading used twice on one page, and the
+    /// first row of a page always under a heading — a page that opens ungrouped
+    /// and then starts grouping halfway down reads as a mistake.
+    #[test]
+    fn every_section_is_anchored_on_a_row_that_exists() {
+        for page in 0..PAGES.len() {
+            if PAGES[page] == "Settings" {
+                // No rows at all: a caption per control, drawn by the layout.
+                continue;
+            }
+            let mut heads = headings(page);
+            assert!(!heads.is_empty(), "{} has no groups", PAGES[page]);
+            assert!(
+                painted(page, &full())[0].0.is_some(),
+                "{} opens ungrouped",
+                PAGES[page]
+            );
+            let found = heads.len();
+            heads.sort_unstable();
+            heads.dedup();
+            assert_eq!(found, heads.len(), "{} repeats a heading", PAGES[page]);
+        }
+    }
+
+    /// The other half of the anchor contract: a heading may only be spelled
+    /// where a row can reach it. Checked by listing every name the tables
+    /// produce and requiring each to be one the page would draw.
+    #[test]
+    fn no_heading_is_spelled_for_a_row_that_cannot_reach_it() {
+        // Each table's anchors, by the row they sit on. A typo on the left of
+        // one of these is a heading that never draws; a typo on the right is a
+        // heading nobody sees. Both are silent, so both are pinned here.
+        let cases: &[(usize, &str, &str)] = &[
+            (OVERVIEW, "Download", "Traffic"),
+            (OVERVIEW, "CPU", "Usage"),
+            (NETWORK, "Network", "Connection"),
+            (NETWORK, "Adapter", "Connection"),
+            (NETWORK, "Wi-Fi", "Signal"),
+            (NETWORK, "Download", "Traffic"),
+            (NETWORK, "Gateway", "Health"),
+            (SYSTEM, "CPU", "Live"),
+            (SYSTEM, "Processor", "Hardware"),
+            (SYSTEM, "Computername", "This machine"),
+            (SYSTEM, "Battery", "Power"),
+            (DATA, "Today", "Totals"),
+        ];
+        for (page, label, name) in cases {
+            // `prev: None` so the second of a doubled anchor still answers.
+            assert_eq!(
+                page_section(*page, label, None),
+                Some(*name),
+                "{}: {label} no longer opens {name}",
+                PAGES[*page]
+            );
+            assert!(
+                page_rows(*page, &full())
+                    .iter()
+                    .any(|(l, _)| l == label),
+                "{}: no row is labelled {label}",
+                PAGES[*page]
+            );
+        }
+    }
+
+    #[test]
+    fn the_doubled_anchor_draws_one_heading_not_two() {
+        // "Connection" is opened by whichever of the SSID and the adapter is
+        // there, because a plugged-in machine has no SSID and a Wi-Fi machine
+        // has both. Both cases have to produce exactly one heading.
+        let both = headings(NETWORK);
+        assert_eq!(both.iter().filter(|h| **h == "Connection").count(), 1);
+
+        let no_ssid = crate::taskbar::TrayModel {
+            wifi_name: None,
+            wifi_text: String::new(),
+            ..full()
         };
-        let rows = page_rows(SYSTEM, &model);
-        let headers: Vec<&str> = rows
-            .iter()
-            .filter_map(|(label, _)| system_section(label))
+        let heads: Vec<&str> = painted(NETWORK, &no_ssid)
+            .into_iter()
+            .filter_map(|(h, _)| h)
             .collect();
         assert_eq!(
-            headers,
-            vec!["Live", "Hardware", "This machine", "Power"],
-            "a group lost its header: {:?}",
-            rows.iter().map(|(l, _)| *l).collect::<Vec<_>>()
+            heads.iter().filter(|h| **h == "Connection").count(),
+            1,
+            "the adapter row lost its heading: {heads:?}"
         );
     }
 
@@ -195,7 +367,38 @@ mod tests {
         };
         let rows = page_rows(SYSTEM, &model);
         assert_eq!(rows.len(), 1);
-        assert_eq!(system_section(rows[0].0), Some("Hardware"));
+        assert_eq!(page_section(SYSTEM, rows[0].0, None), Some("Hardware"));
+    }
+
+    #[test]
+    fn every_page_groups_its_rows_in_the_order_it_reads_them() {
+        // The headings a page ends up with, in row order, from a model that
+        // answered everything. This is the page's table of contents: if a row
+        // moves, this fails rather than the page quietly reading differently.
+        assert_eq!(headings(OVERVIEW), vec!["Traffic", "Usage"]);
+        assert_eq!(
+            headings(NETWORK),
+            vec!["Connection", "Signal", "Traffic", "Health"]
+        );
+        assert_eq!(
+            headings(SYSTEM),
+            vec!["Live", "Hardware", "This machine", "Power"]
+        );
+        assert_eq!(headings(DATA), vec!["Totals"]);
+        // A heading over a single row is not a group, it is a caption: two
+        // headings for two rows would be more furniture than content. The Data
+        // page is the one exception — its day list gives "Totals" a second row
+        // in practice, above a standalone caption of its own.
+        for page in [OVERVIEW, NETWORK, SYSTEM] {
+            let rows = page_rows(page, &full());
+            let heads = headings(page).len();
+            assert!(
+                rows.len() >= heads * 2,
+                "{}: {heads} headings over {} rows is more caption than content",
+                PAGES[page],
+                rows.len()
+            );
+        }
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! rectangle, a hairline, a glyph and a label-value pair, which is everything
 //! the four metric pages and the settings page are actually made of.
 
-use crate::ui::design::{ICON_COL, Palette, S1, S3, S6};
+use crate::ui::design::{GROUP_COL, ICON_COL, Palette, S1, S2, S3, S6};
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
@@ -163,6 +163,14 @@ pub(crate) struct Canvas<'a> {
     /// Replaces the palette's body colour for rows. Set for a whole page — an
     /// over-quota window is red top to bottom rather than red in a footnote.
     emph: Option<COLORREF>,
+    /// Whether rows are drawn past the group-heading column.
+    ///
+    /// Sticky rather than per-row: a heading is drawn on its group's *first*
+    /// row's band, and if only that row moved, the heading would sit beside it
+    /// and every row under it would start in a different place — a group that
+    /// looks ragged. Once a page has a heading, all of its rows share the
+    /// column the heading left for them.
+    indented: bool,
 }
 
 impl<'a> Canvas<'a> {
@@ -186,6 +194,7 @@ impl<'a> Canvas<'a> {
             row_h,
             nudge,
             emph: None,
+            indented: false,
         }
     }
 
@@ -197,6 +206,17 @@ impl<'a> Canvas<'a> {
     /// The colour body text is drawn in.
     fn text_colour(&self) -> COLORREF {
         self.emph.unwrap_or(self.pal.text)
+    }
+
+    /// The left edge a row's label is drawn from. Past the heading column once
+    /// this page has drawn one, so a label never collides with the heading on
+    /// its own band.
+    fn label_x(&self) -> i32 {
+        if self.indented {
+            self.x0 + GROUP_COL + S2
+        } else {
+            self.x0
+        }
     }
 
     /// Where the cursor is. The painter uses it to place the sparkline under
@@ -235,8 +255,11 @@ impl<'a> Canvas<'a> {
     }
 
     /// A muted caption naming the group of rows that follow, with a rule under
-    /// it. A metric page is a wall of label-value pairs, and the section is what
-    /// turns the wall into two or three readable groups.
+    /// it, on a band of its own.
+    ///
+    /// This is the *standalone* group caption, for a list whose rows are not
+    /// page rows — the Data page's day list, whose labels are runtime dates. A
+    /// metric page uses `heading_row` instead, which costs no vertical space.
     pub(crate) fn section(&mut self, text: &str) {
         self.space(S3);
         // SAFETY: as above; `hairline` documents its own contract.
@@ -257,7 +280,51 @@ impl<'a> Canvas<'a> {
         self.y += self.row_h;
     }
 
+    /// A group heading drawn *on* the band of the row it names, with a faint
+    /// rule filling the space beside it.
+    ///
+    /// It costs no vertical space and moves nothing, which is the whole reason
+    /// the group headings can be added to pages that are already laid out: a
+    /// heading that claimed a band of its own would push every row below it
+    /// down, and the row order — which is the thing the pages are actually
+    /// careful about — would then depend on where someone put a caption.
+    ///
+    /// The heading is drawn at the content edge and the rows it governs are
+    /// indented past the column it leaves (`label_x`), so the two never share a
+    /// pixel. It is *not* ellipsised: it is clipped to its column, because a
+    /// heading cut off mid-word still reads as a heading, while one ending in an
+    /// ellipsis reads as a value someone truncated.
+    pub(crate) fn heading_row(&mut self, text: &str) {
+        self.indented = true;
+        // SAFETY: as above; `hairline` documents its own contract.
+        unsafe {
+            SetTextColor(self.dc, self.pal.muted);
+            let right = self.x0 + GROUP_COL;
+            draw(
+                self.dc,
+                self.fonts.caption,
+                &text.to_uppercase(),
+                self.x0 + S1,
+                self.y + self.nudge,
+                right,
+                DT_LEFT,
+            );
+            hairline(
+                self.dc,
+                right + S2,
+                self.x1,
+                self.y + self.row_h / 2,
+                self.pal.border,
+            );
+        }
+    }
+
     /// A caption with its value right-aligned on the same band.
+    ///
+    /// The label's left edge is `label_x`, which is where the group headings
+    /// pushed it once this page drew one; the value stays pinned to the right
+    /// edge either way, so the values column of a page is a single line down it
+    /// regardless of how the labels are indented.
     pub(crate) fn row(&mut self, label: &str, value: &str) {
         // SAFETY: a live DC and fonts owned by the caller's frame.
         unsafe {
@@ -266,7 +333,7 @@ impl<'a> Canvas<'a> {
                 self.dc,
                 self.fonts.body,
                 label,
-                self.x0,
+                self.label_x(),
                 self.y + self.nudge,
                 self.x1,
                 DT_LEFT,
@@ -360,6 +427,14 @@ mod tests {
         let before_row = c.y();
         c.row("Download", "1.4G");
         assert_eq!(c.y() - before_row, 30, "a row is exactly one band");
+
+        // The load-bearing property of the page-wide grouping: a heading rides
+        // on a row's band, so adding one to a page cannot move any row. If this
+        // ever moves, every grouping assertion over row *order* still passes
+        // while the pages have quietly grown taller than the window.
+        let before_head = c.y();
+        c.heading_row("Traffic");
+        assert_eq!(c.y(), before_head, "a group heading must not claim a band");
 
         let before_note = c.y();
         c.note("saved", pal.text);

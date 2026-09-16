@@ -48,6 +48,15 @@ pub(crate) const RADIUS: i32 = 8;
 /// The column a sidebar entry spends on its glyph, before its label starts.
 pub(crate) const ICON_COL: i32 = 28;
 
+/// The column a group heading occupies on a metric row's band, before its rule
+/// starts.
+///
+/// Wide enough for the longest heading in use — `THIS MACHINE` — with room to
+/// spare, and narrow enough that a row's own label still fits beside it at the
+/// minimum window width. Too narrow and the longest heading would be cut; too
+/// wide and the rule beside it would be a stub.
+pub(crate) const GROUP_COL: i32 = 116;
+
 /// How many steps a sidebar entry is lifted from the theme's background.
 const SIDEBAR_STEP: u32 = 12;
 

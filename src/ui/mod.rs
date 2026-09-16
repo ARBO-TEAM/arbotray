@@ -622,6 +622,12 @@ mod tests {
             battery_text: "88%".into(),
             power_text: "Plugged in".into(),
             uptime_text: "3d 4h".into(),
+            // Two volumes, so the page's own tests see the multi-drive path
+            // rather than the one-drive case that would pass either way.
+            disks: vec![
+                ("C:".into(), "210G free of 931G".into()),
+                ("D:".into(), "1.2T free of 1.8T".into()),
+            ],
         }
     }
 

@@ -16,9 +16,24 @@ pub(crate) const SPARK_GAP: i32 = 14;
 pub(crate) const SIDEBAR_W: i32 = 150;
 pub(crate) const TITLE_EXTRA: i32 = 6;
 
-/// Smallest size still showing every row without the frame collapsing. Wider
-/// than the single-column window was, because the sidebar eats its share.
-pub(crate) const MIN_W: i32 = 520;
+/// Air above the page title.
+///
+/// The first band on a page is laid out from its top, so a title larger than a
+/// row would start at the very edge of the window with all its extra height
+/// below it. Padding the top instead moves the whole block — title and rows —
+/// down together, which is the difference between a page and a screenshot
+/// pinned to the ceiling. The Settings page's controls are off by the same
+/// amount, so it has to be a constant rather than a number in one painter.
+pub(crate) const TITLE_PAD: i32 = 12;
+
+/// Smallest size still showing every row without the frame collapsing.
+///
+/// Two columns' worth of furniture before any content: the sidebar eats its
+/// share, and since the pages are grouped, every row's label starts a group
+/// heading column in from the content edge. At the old 520 the widest pair in
+/// the window — `Processor` beside `AMD Ryzen 5 7600 6-Core Processor` — no
+/// longer fit and would have been ellipsised, so the floor moved out with them.
+pub(crate) const MIN_W: i32 = 660;
 pub(crate) const MIN_H: i32 = 320;
 
 /// Initial size: room for the rows plus a decent sparkline.

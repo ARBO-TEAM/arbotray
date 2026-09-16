@@ -7,7 +7,7 @@ use crate::ui::consts::{
     BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_BG, SET_FG, SET_FONT, SET_INTERVAL,
     SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
-use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, VALUE_OFFSET, layout, rebuild_fonts};
+use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
 use crate::ui::theme::{scale, sidebar_w};
 use crate::ui::UiState;
@@ -476,7 +476,9 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         // The first row of controls sits one title-height below the page
         // heading, exactly where `paint` puts its first row — so the labels and
         // the controls that belong to them share a band.
-        let top = pad + scale(ROW_H + TITLE_EXTRA * 2, state.dpi) + scale(VALUE_OFFSET, state.dpi);
+        let top = pad
+            + scale(TITLE_PAD + ROW_H + TITLE_EXTRA * 2, state.dpi)
+            + scale(VALUE_OFFSET, state.dpi);
         let _ = h;
 
         let field_w = scale(FIELD_W, state.dpi);

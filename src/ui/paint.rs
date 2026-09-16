@@ -11,11 +11,11 @@ use crate::taskbar::render::sparkline_points;
 use crate::ui::components::{Canvas, Fonts};
 use crate::ui::design::palette;
 use crate::ui::pages::{
-    DATA, PAGES, SETTINGS, SYSTEM, page_rows, page_shows_graph, system_section, usage_rows,
+    DATA, PAGES, SETTINGS, SYSTEM, page_rows, page_section, page_shows_graph, usage_rows,
 };
 use crate::ui::settings::SET_ROW_LABELS;
 use crate::ui::theme::scale;
-use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, VALUE_OFFSET, UiState};
+use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject,
@@ -85,6 +85,12 @@ pub(crate) fn paint(hwnd: HWND, state: &UiState) {
             scale(VALUE_OFFSET, state.dpi),
             pad,
         );
+        // A title is larger than a row, and the first band is laid out from its
+        // *top* — so the title would sit high in its band with a gap under it.
+        // The gap above it is padded instead, which is what makes the block of
+        // title and rows look centred in the window rather than pushed to the
+        // ceiling. `layout_settings` moves its controls by the same amount.
+        c.space(scale(TITLE_PAD, state.dpi));
         c.heading(PAGES[page], scale(ROW_H + TITLE_EXTRA * 2, state.dpi));
 
         // An over-quota window is red top to bottom, not red in a footnote: the
@@ -93,19 +99,35 @@ pub(crate) fn paint(hwnd: HWND, state: &UiState) {
             c.emphasise(pal.danger);
         }
 
+        // Which heading the page has drawn last, so a group opened by two rows
+        // — "Connection" is either the SSID or the adapter, whichever is there —
+        // draws one heading rather than one per row.
+        let mut drawn: Option<&'static str> = None;
         for (label, value) in &page_rows(page, &state.model) {
-            // The System page is ten pairs tall, and ten pairs with nothing
-            // between them is a wall. Its groups get the same caption-and-rule
-            // the Data page's day list already uses, so the page reads in four
-            // short blocks instead of one long one. Anchored on the row, so a
-            // group whose first row is switched off has no header rather than a
-            // header standing over someone else's rows.
-            if page == SYSTEM {
-                if let Some(name) = system_section(label) {
-                    c.section(name);
-                }
+            // A metric page is a wall of pairs, and ten of them with nothing
+            // between them is a wall ten rows tall. The headings come from the
+            // page's own anchor table and are drawn *on* the row they name, so
+            // grouping costs no vertical space and cannot move a row out of
+            // order. Anchored on the row, so a group whose first row is
+            // switched off has no heading rather than one standing over someone
+            // else's rows.
+            if let Some(name) = page_section(page, label, drawn) {
+                c.heading_row(name);
+                drawn = Some(name);
             }
             c.row(label, value);
+        }
+
+        // The System page's volumes. They come through here rather than through
+        // `page_rows` for the same reason the day list below does: a drive
+        // letter is a runtime label, not a `&'static str` caption. Under a
+        // caption of its own so a machine with three volumes reads as one group
+        // instead of three stray rows under the power reading.
+        if page == SYSTEM && !state.model.disks.is_empty() {
+            c.section("Storage");
+            for (mount, usage) in &state.model.disks {
+                c.row(mount, usage);
+            }
         }
 
         // The Data page's day-by-day breakdown, under the two totals above it.
