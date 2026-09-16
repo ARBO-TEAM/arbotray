@@ -25,8 +25,8 @@ const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// The number of daily records kept when the config says nothing sane.
 const MIN_KEEP_DAYS: usize = 1;
-/// Ten years. Past any use, and it bounds what a hand-edited `raw_days` can
-/// grow this file to.
+/// Ten years. Past any use, and it bounds what a hand-edited `days` can grow
+/// this file to.
 const MAX_KEEP_DAYS: usize = 3650;
 
 /// One day's byte counters.
@@ -70,8 +70,8 @@ pub struct Usage {
     /// which is what stops the first tick from counting all traffic since boot.
     last: Option<(u64, u64)>,
     saved_at: Option<Instant>,
-    /// How many days the file keeps, from `Retention.raw_days`. Bounded on the
-    /// way in: `0` would erase today's total as it is written.
+    /// How many days the file keeps, from `Retention.days`. Bounded on the way
+    /// in: `0` would erase today's total as it is written.
     keep_days: usize,
 }
 
@@ -256,7 +256,7 @@ impl Usage {
     }
 }
 
-/// Bound `Retention.raw_days` to something the file can hold.
+/// Bound `Retention.days` to something the file can hold.
 pub fn clamp_keep_days(days: u32) -> usize {
     (days as usize).clamp(MIN_KEEP_DAYS, MAX_KEEP_DAYS)
 }
