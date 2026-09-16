@@ -7,3 +7,4 @@ pub mod app;
 pub mod config;
 pub mod taskbar;
 pub mod telemetry;
+pub mod ui;

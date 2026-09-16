@@ -6,6 +6,7 @@
 
 pub mod dock;
 pub mod events;
+pub mod icon;
 pub mod render;
 
 pub use dock::{Notifier, Tray};
@@ -58,6 +59,19 @@ impl TrayModel {
                 None => "--".into(),
             };
         }
+        if cfg.show.wifi {
+            // No adapter (or not on Wi-Fi) stays blank rather than showing a
+            // permanent "?" — an indicator that is always there and always
+            // meaningless is just noise in the taskbar.
+            if let Some(w) = &m.wifi {
+                let band = w.band.as_ref().map(|b| b.label()).unwrap_or("?");
+                out.wifi_text = match w.signal_pct {
+                    Some(pct) => format!("{band} {pct}%"),
+                    None => band.to_string(),
+                };
+                out.wifi_name = w.ssid.clone();
+            }
+        }
         if let Some(hw) = &m.hw {
             if cfg.show.cpu {
                 out.cpu_text = format!("{:.0}%", hw.cpu_pct);
@@ -72,6 +86,25 @@ impl TrayModel {
             }
         }
         out
+    }
+
+    /// Hover text for the tray icon.
+    ///
+    /// The topic is the one thing the taskbar has no room for: the network
+    /// name. `szTip` renders newlines as line breaks and has no other
+    /// formatting, and the buffer is fixed-size, so the caller truncates.
+    pub fn tooltip(&self) -> String {
+        let mut tip = String::from("ArboTray");
+        let metrics = render::visible_segments(self).join("  ");
+        if !metrics.is_empty() {
+            tip.push('\n');
+            tip.push_str(&metrics);
+        }
+        if let Some(name) = &self.wifi_name {
+            tip.push_str("\nWiFi: ");
+            tip.push_str(name);
+        }
+        tip
     }
 }
 

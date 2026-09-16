@@ -8,6 +8,7 @@
 use crate::config::Config;
 use crate::taskbar::TrayModel;
 use crate::taskbar::events::{WM_TRAY_UPDATE, WindowState, wnd_proc};
+use crate::taskbar::icon::Icon;
 use crate::taskbar::render::Renderer;
 use std::sync::mpsc::{Sender, channel};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
@@ -100,12 +101,15 @@ impl Tray {
                 .map_err(|e| format!("GetWindowRect(TrayNotifyWnd): {e}"))?;
 
             let (sender, receiver) = channel();
-            let state = Box::new(WindowState {
+            let mut state = Box::new(WindowState {
                 receiver,
                 model: TrayModel::default(),
                 renderer: Renderer::new(cfg, dpi),
                 cfg: cfg.clone(),
                 taskbar_created,
+                icon: None,
+                instance: HINSTANCE(module.0),
+                ui: HWND::default(),
             });
 
             // Reserve width from a worst-case sample so changing digits never
@@ -141,6 +145,18 @@ impl Tray {
                     GetLastError().0
                 )
             })?;
+
+            // The icon can only be added once the window exists to receive its
+            // clicks. Its menu is the only way to quit, so a refusal here is
+            // fatal — tear the half-built window down rather than run
+            // unquittable.
+            match Icon::install(hwnd, HINSTANCE(module.0), &state.model.tooltip()) {
+                Ok(icon) => state.icon = Some(icon),
+                Err(e) => {
+                    let _ = DestroyWindow(hwnd);
+                    return Err(format!("tray icon: {e}"));
+                }
+            }
 
             let notifier = Notifier { sender, hwnd };
             Ok((Tray { hwnd, state }, notifier))

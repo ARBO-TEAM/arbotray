@@ -5,15 +5,17 @@
 //! message can reach the receiver and renderer without a global.
 
 use crate::config::Config;
+use crate::taskbar::icon::{self, CMD_OPEN, CMD_QUIT, Icon, show_menu};
 use crate::taskbar::render::Renderer;
 use crate::taskbar::TrayModel;
+use crate::ui;
 use std::sync::mpsc::Receiver;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CREATESTRUCTW, DefWindowProcW, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, MoveWindow,
-    PostQuitMessage, SetWindowLongPtrW, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_NCCREATE, WM_PAINT,
+    CREATESTRUCTW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect, GetWindowLongPtrW,
+    MoveWindow, PostQuitMessage, SetWindowLongPtrW, WM_APP, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP,
 };
 
 /// Posted by the telemetry thread to wake the loop with a fresh sample.
@@ -27,6 +29,13 @@ pub struct WindowState {
     pub cfg: Config,
     /// `RegisterWindowMessageW("TaskbarCreated")` — sent when Explorer restarts.
     pub taskbar_created: u32,
+    /// `None` only between window creation and icon install.
+    pub icon: Option<Icon>,
+    /// Our own module, for the icon resource and the dashboard's window class.
+    pub instance: HINSTANCE,
+    /// The dashboard, created on first use and invalid until then. It lives on
+    /// this thread, so it is written to directly rather than messaged.
+    pub ui: HWND,
 }
 
 /// Window procedure for the docked tray child.
@@ -74,7 +83,39 @@ pub unsafe extern "system" fn wnd_proc(
                 while let Ok(model) = state.receiver.try_recv() {
                     state.model = model;
                 }
+                if let Some(icon) = &mut state.icon {
+                    icon.set_tip(&state.model.tooltip());
+                }
+                // The dashboard is fed here rather than from the telemetry
+                // thread: same thread as the window, so no queue is needed.
+                ui::update(state.ui, &state.model);
                 let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+
+            // Left click opens the dashboard — the normal thing a click on an
+            // app's face does. Right click gets the menu, which is where
+            // quitting lives.
+            WM_LBUTTONUP => {
+                open_dashboard(state);
+                LRESULT(0)
+            }
+
+            WM_RBUTTONUP => {
+                menu(state, hwnd);
+                LRESULT(0)
+            }
+
+            // The tray icon is a separate window from the system's point of
+            // view, so its clicks arrive as `WM_TRAY_ICON` with the mouse
+            // message packed into the low word of `lparam` — not as the
+            // `WM_*BUTTONUP` above. Same two gestures, same handler.
+            icon::WM_TRAY_ICON => {
+                match low_word(lparam.0 as usize) as u32 {
+                    WM_LBUTTONUP => open_dashboard(state),
+                    WM_RBUTTONUP => menu(state, hwnd),
+                    _ => {}
+                }
                 LRESULT(0)
             }
 
@@ -110,12 +151,46 @@ pub unsafe extern "system" fn wnd_proc(
             }
 
             WM_DESTROY => {
+                // Take the dashboard down with us. Leaving a top-level window
+                // behind an exiting process would strand it on screen.
+                ui::close(state.ui);
                 PostQuitMessage(0);
                 LRESULT(0)
             }
 
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+/// Create the dashboard if it does not exist yet, then raise it.
+///
+/// The window is built lazily rather than at startup: most of the time nobody
+/// clicks, and an app that puts a window on screen before it is asked to is
+/// the reason people uninstall tray tools.
+fn open_dashboard(state: &mut WindowState) {
+    if let Some(hwnd) = ui::ensure(state.instance, &state.cfg, &state.model, state.ui) {
+        state.ui = hwnd;
+        ui::show(hwnd);
+    }
+}
+
+/// Show the right-click menu and act on the choice. The menu is the only route
+/// to Exit, so it is reachable from both the taskbar strip and the tray icon.
+fn menu(state: &mut WindowState, hwnd: HWND) {
+    match show_menu(hwnd) {
+        Some(CMD_OPEN) => open_dashboard(state),
+        Some(CMD_QUIT) => {
+            // Destroying tears down the icon in `WindowState::drop` and posts
+            // the `WM_QUIT` that ends the message loop.
+            ui::close(state.ui);
+            // SAFETY: `hwnd` is our own live window.
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+        // `None` is the menu being dismissed, which is not a command.
+        _ => {}
     }
 }
 
