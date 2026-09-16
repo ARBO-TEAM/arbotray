@@ -51,7 +51,7 @@ The binary lands at `target/release/arbotray.exe` (~485 KB).
 - **Gateway latency** — ICMP probe every 3 s, cached between probes
 - **CPU and RAM** — `GetSystemTimes` and `GlobalMemoryStatusEx`
 - **Wi-Fi band and signal** — WLAN API, e.g. `5G 78%`
-- **Today's data usage** — running total, in the taskbar and in the icon tooltip
+- **Today's data usage** — running total, in the taskbar and in the icon tooltip. On by default, with no setup needed: it is the reading a metered connection most needs in front of it
 - **Mini-sparkline** — recent download throughput
 
 Hovering the tray icon shows the full readout — every enabled field under its own label, the two rates under ↓ and ↑ — plus the connected network name, which is the one field too long for the taskbar. The lines are fitted to the tooltip, so the last one is dropped rather than clipped when a machine reports everything at once.

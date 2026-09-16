@@ -21,7 +21,7 @@ pub const DEFAULT_JSON: &str = r##"{
     "cpu": true,
     "ram": true,
     "wifi": false,
-    "usage": false,
+    "usage": true,
     "sparkline": true
   },
   "interval_ms": 1000,
@@ -60,8 +60,9 @@ pub struct Show {
     pub cpu: bool,
     pub ram: bool,
     pub wifi: bool,
-    /// Today's total traffic. Off by default: most people have no quota to
-    /// watch, and it is the widest tile of the lot.
+    /// Today's total traffic. On by default: the counter's whole job is to be
+    /// visible without opening the dashboard, and it is the reading a metered
+    /// connection most needs in front of it.
     pub usage: bool,
     pub sparkline: bool,
 }
@@ -164,7 +165,7 @@ impl Default for Show {
             cpu: true,
             ram: true,
             wifi: false,
-            usage: false,
+            usage: true,
             sparkline: true,
         }
     }

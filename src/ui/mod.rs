@@ -1079,8 +1079,12 @@ mod tests {
         apply_tiles(&mut show, &flipped);
         assert_eq!(tile_flags(&show), flipped);
 
+        // The stock tile set, in `TILE_LABELS` order. `wifi` is the one left
+        // off — a machine without a wireless card should not open with a dead
+        // tile — and `usage` is on because the counter exists to be visible
+        // without opening the dashboard.
         let back = crate::config::Show::default();
-        assert_eq!(tile_flags(&back), [true, true, true, true, true, false, false, true]);
+        assert_eq!(tile_flags(&back), [true, true, true, true, true, false, true, true]);
     }
 
     #[test]
