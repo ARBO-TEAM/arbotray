@@ -444,6 +444,35 @@ mod tests {
     }
 
     #[test]
+    fn a_file_from_the_one_day_shape_still_loads() {
+        // The riskiest part of the change to a window of days: an existing
+        // install has a `usage.json` holding a single `{day, rx, tx}`. If that
+        // shape failed to parse, `load` would fall back to defaults — silently
+        // discarding the day in flight on a machine that never touched a config
+        // *and* refusing nothing, so nothing would report it. Pinned here
+        // because the loss is invisible at runtime.
+        let old = r#"{"day":"2026-09-16","rx":1234,"tx":5678}"#;
+        let parsed: Stored = serde_json::from_str(old).expect("the old shape must still parse");
+        assert!(
+            parsed.days.is_empty(),
+            "an old file starts the window empty rather than failing to load"
+        );
+
+        // And the new shape round-trips, so the window survives a restart.
+        let now = Stored {
+            days: vec![Day {
+                day: "2026-09-16".into(),
+                rx: 1,
+                tx: 2,
+            }],
+        };
+        let text = serde_json::to_string(&now).unwrap();
+        let back: Stored = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.days.len(), 1);
+        assert_eq!(back.days[0].total(), 3);
+    }
+
+    #[test]
     fn history_is_short_keys_oldest_first() {
         // The Data page draws these directly, so the pairing of a label and its
         // total is the contract.

@@ -2,7 +2,9 @@
 //! `Shell_TrayWnd`, and paints the metric text into it.
 //!
 //! `dock` finds and attaches to the taskbar, `render` draws, `events` is the
-//! WndProc that survives Explorer restarts and DPI changes.
+//! WndProc that follows DPI changes. An Explorer restart destroys the parent
+//! taskbar and with it our child window — see the `TaskbarCreated` arm in
+//! `events` for why that currently ends the process instead of re-attaching.
 
 pub mod dock;
 pub mod events;

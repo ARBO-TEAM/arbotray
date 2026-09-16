@@ -11,39 +11,52 @@ Every row below was verified against working code. A config field, a struct fiel
 | Live Speed Widget | Done | `src/taskbar/mod.rs:50-54` formats `rx_bps`/`tx_bps` into `down_text`/`up_text`; painted at `src/taskbar/render.rs:243-253` |
 | Always-on-Top Widget | Not done | No `HWND_TOPMOST` / `WS_EX_TOPMOST` anywhere; the only `SetWindowPos` is sidebar layout with `SWP_NOZORDER` (`src/ui/mod.rs:533-541`) |
 | System Tray Icon | Partial | Icon installed and tooltip updated (`src/taskbar/icon.rs:72-104`), but no `NIF_INFO` / balloon → no notifications |
-| Settings (UI) | Not done | `Config::save()` exists (`src/config/mod.rs:138-145`) with **zero callers**; no settings UI of any kind |
-| Adapter Config | Not done | No `GetAdaptersAddresses` / `IP_ADAPTER_*`; interface selection never exists (`src/telemetry/network.rs:32-54` sums all adapters) |
+| Settings (UI) | Done | `Settings` is page 4 of the sidebar (`src/ui/mod.rs` `PAGES`): eight tile checkboxes, interval, quota, font, three colours and opacity, all read/written through control ids and applied by `Config::save()` |
+| Adapter Config | Not done | `GetAdaptersAddresses` now reads the routed interface (`src/telemetry/adapter.rs`), but only to display it — `src/telemetry/network.rs:32-54` still sums every adapter, so there is no per-interface selection or configuration |
 | Dark & Light Theme | Partial | Colours/font/alert fully applied via config JSON (`src/taskbar/render.rs:222-237`, `src/ui/mod.rs:569-574`); no theme picker and `Theme.opacity` is only tested as `== 0` |
-| Dashboard | Partial | Real window with 4-page sidebar (`src/ui/mod.rs:56-60`, `page_rows` at `963-1006` in-file: `:244-279`) but only shows the 8 taskbar values; no charts/statistics |
+| Dashboard | Partial | Real window with a 5-page sidebar (`PAGES` in `src/ui/mod.rs`) showing the taskbar values, adapter detail, hardware and the usage breakdown, but still no charts — the sparkline is the only graph |
 | Data Plan | Partial | Quota percent + over-quota colour works (`src/app.rs:79-85`, `src/telemetry/usage.rs:145-150`); quota is set by hand-editing JSON and the percentage is never printed |
 | WiFi | Partial | SSID, band and signal read (`src/telemetry/wifi.rs:101-111`); no signal history, no saved-password management, no scan |
 | Network Tools | Not done | No traceroute, DNS check or connection analysis; the only ICMP is a fixed gateway probe |
 | Speed Test | Not done | Zero hits for `speed_test` / `SpeedTest` / `download_test`; no on-demand throughput measurement |
-| Test History | Not done | No test-result model, no persisted history; `src/telemetry/usage.rs` stores one day's counters only |
-| Usage Stats | Partial | Daily total only (`src/telemetry/usage.rs:36-150`); `Retention` (`src/config/mod.rs:52-58`) is parsed but never read → no daily/monthly breakdown |
-| Network Info | Partial | Gateway latency (`src/telemetry/latency.rs:53-90`) and SSID (`wifi.rs:135-164`) reach the UI; gateway IP, local IP, DNS and `loss_pct` never do |
+| Test History | Not done | No test-result model, no persisted history. `usage.json` now holds a week of daily totals, but that is traffic history, not test results |
+| Usage Stats | Done | Rolling window of daily records in `usage.json`, capped by `Retention.days` (`src/telemetry/usage.rs`); the Data page shows today, a month total and the last seven days |
+| Network Info | Done | Gateway address, public-resolver latency, packet loss, adapter name, local IP and resolver list all reach the Network page (`src/telemetry/adapter.rs`, `latency.rs`) |
 | Network Interface | Not done | `GetIfTable2` rows are summed and discarded (`src/telemetry/network.rs:44-50`); no per-interface stats |
 | Active Process | Not done | No `GetProcessIoCounters` / ETW / PID mapping; README documents this as unavailable |
 | Stopwatch | Not done | Zero hits for `stopwatch`; no session timer anywhere |
 | Port Active | Not done | No `GetExtendedTcpTable` / `GetTcpTable` / `GetUdpTable` |
 
-Counts: **4 Done, 6 Partial, 10 Not done** (20 items).
+Counts: **4 Done, 5 Partial, 9 Not done** — 18 rows, counted from the table above, which is the authority.
 
-The four dashboard pages (`src/ui/mod.rs:56`) are `Overview` (0), `Network` (1), `System` (2), `Data` (3). A fifth page (e.g. `Settings`) has to be appended to `PAGES`, not inserted — the `OVERVIEW`/`NETWORK`/`SYSTEM`/`DATA` constants (`src/ui/mod.rs:57-60`) are positional.
+The five dashboard pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Settings` (4). The `OVERVIEW`/`NETWORK`/`SYSTEM`/`DATA`/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
 
 ## Done
 
 ### Live Speed Widget
 The product's core and complete. `Sampler::poll` reads cumulative octet counters over every up, non-loopback interface and divides the delta by elapsed time (`src/telemetry/network.rs:21-26`, `:72-89`); `TrayModel::from_metric` formats both directions (`src/taskbar/mod.rs:48-55`); the renderer draws them into the taskbar next to the clock (`src/taskbar/render.rs:240-253`), with a 60-sample download sparkline (`src/app.rs:17-18`, `:87-97`). Counter resets are handled as lost deltas rather than spikes (`network.rs:111-115`).
 
-### Network Info — gateway latency (the part that ships)
-`IcmpSendEcho` against the default route, probed every 3 s and cached between polls so the tray never stalls (`src/telemetry/latency.rs:20-25`, `:160-186`), rendered as `NNms` with a `--` placeholder when unreachable (`src/taskbar/mod.rs:56-61`).
+### Network Info
+`IcmpSendEcho` against the default route and a public resolver, probed every 3 s and cached between polls so the tray never stalls (`src/telemetry/latency.rs`). The gateway is rendered as `NNms` with a `--` placeholder when unreachable; the Network page adds the gateway address, the internet latency, packet loss, the routed adapter's name and local address, and every resolver Windows was handed.
 
-### Usage total + quota alert (the part that ships)
-Today's bytes are accumulated from raw counters, not from rounded rates, persisted to `%APPDATA%\ArboTray\usage.json` at most every 30 s, and rolled over at local midnight (`src/telemetry/usage.rs:78-123`). Over-quota recolours the whole taskbar run and the dashboard (model flag set at `src/app.rs:79-85`; consumed at `src/taskbar/render.rs:233-237` and `src/ui/mod.rs:570-574`).
+Addresses arrive from Win32 in **network byte order** — the bytes are the address and the numeric value is not, so `Ipv4Addr::from(u32)` silently prints `192.168.1.1` as `1.1.168.192`. All of them go through `crate::taskbar::format_addr`, pinned by `addresses_are_read_in_network_byte_order`.
 
-### Wi-Fi readout (the part that ships)
-WLAN API handle opened once and closed on drop; SSID decoded lossily from the raw 32-byte payload with a bounded length (`src/telemetry/wifi.rs:42-53`), band derived from the channel number (`:31-38`), signal quality 0-100. Shown as `5G 78%` in the taskbar when `show.wifi` is on, and the SSID in the icon tooltip and on the Network page (`src/taskbar/mod.rs:96-108`, `src/ui/mod.rs:252-260`).
+### Usage history — daily and monthly
+
+`usage.json` keeps a rolling window of daily byte records, oldest first, capped by `Retention.days` (default 7). Both counts come from deltas of the cumulative interface counters, so the totals are exact rather than a sum of rounded rates; a counter that goes backwards is an adapter reset and its delta is dropped rather than underflowing. The Data page shows today, the month total and the last seven days, and the month row's caption becomes `Month so far` when the window no longer reaches the first of the month — a partial sum must not read as month-to-date.
+
+A `usage.json` from the single-day shape loads as an empty window: it does not fail, it starts the day at zero once. That is a deliberate one-time cost, pinned by `a_file_from_the_one_day_shape_still_loads`.
+
+Today's bytes are accumulated from raw counters, not from rounded rates, persisted to `%APPDATA%\ArboTray\usage.json` at most every 30 s, and rolled over at local midnight (`src/telemetry/usage.rs`). Over-quota recolours the whole taskbar run and the dashboard (model flag set in `src/app.rs`; consumed in `src/taskbar/render.rs`).
+
+### Settings page (the part that ships)
+
+`Settings` is page 4: eight tile checkboxes, refresh interval, data plan, font size, three colours and opacity. The page never holds a `Config` while the user types — `SettingsForm` keeps raw strings, and `into_config` is the single place a typed value becomes a setting, so an emptied numeric field is "no value yet" rather than a `0` that erases the setting. Save writes through `Config::save()`; a write that fails reports it rather than claiming success.
+
+Two copies of the config used to exist — the window's and the telemetry thread's — which is why a Settings edit could appear to do nothing. Both now read one `Arc<Mutex<Config>>`, re-read per tick.
+
+### Wi-Fi readout
+WLAN API handle opened once and closed on drop; SSID decoded lossily from the raw 32-byte payload with a bounded length (`src/telemetry/wifi.rs`), band derived from the channel number, signal quality 0-100. Shown as `5G 78%` in the taskbar when `show.wifi` is on, and the SSID in the icon tooltip and on the Network page.
 
 ## Partial
 
@@ -77,18 +90,6 @@ Band, SSID and signal all work (see Done above). Missing vs "kekuatan sinyal, hi
 - Next step: add `WlanGetAvailableNetworkList` for a scan list on the Network page; password management is gated on a settings UI and on writing credentials, which is a larger security decision.
 - Dashboard page: Network.
 
-### Usage Stats — today only, retention is dead code
-The daily accumulator is exact (deltas from cumulative counters) and survives counter resets and date changes (`src/telemetry/usage.rs:78-89`, `:110-123`). Missing vs "pembagian penggunaan kuota harian dan bulanan": there is no history at all — one file, one day, two integers, and yesterday is overwritten at midnight (`:111-123`). The `Retention { raw_days, minute_days, hour_days }` config (`src/config/mod.rs:52-58`) is declared, serialised and never read by any code (`grep -rn retention src/` matches only that block and a doc comment), so the planned raw→minute→hour aggregation described in `docs/PLAN.md:29-32` does not exist. There is also no `src/storage/` module.
-
-- Next step: append one record per day to a `history.json` array instead of overwriting, and add a per-day bar list to the Data page. `Retention` should either be honoured here or deleted.
-- Dashboard page: Data.
-
-### Network Info — gateway latency and SSID only
-What reaches a user: gateway round-trip (`src/taskbar/mod.rs:57-60`, Network page row at `src/ui/mod.rs:259`) and the SSID (`src/ui/mod.rs:253-255`). Missing vs "alamat IP, DNS, gateway, dan detail koneksi": no local IP, no gateway *address* (the gateway `u32` is computed and thrown away — `src/telemetry/latency.rs:171-178` pings it but never formats it), no DNS servers, no adapter description. Two collected values are dropped on the floor: `LatencySample.loss_pct` is computed from a 10-probe window (`latency.rs:35-41`, `:196`) and read by no UI code, and `internet_ms` is hardcoded `None` with the target constant parked behind `#[allow(dead_code)]` (`:182-183`, `:201-206`).
-
-- Next step: cheapest win in the list — add a Network page row for packet loss (the number already exists) and wire the 8.8.8.8 probe, then add local IP/DNS via `GetAdaptersAddresses`.
-- Dashboard page: Network.
-
 ## Not done
 
 ### Always-on-Top Widget
@@ -96,12 +97,6 @@ The IMPROVE.md item is a floating, draggable, always-topmost widget. ArboTray's 
 
 - Next step: treat as a deliberate divergence rather than a gap, or add a docked/strip position choice. A true floating widget means a second top-level window with `WS_EX_TOPMOST`, owning its own paint loop — a new module, not a flag.
 - Dashboard page: none — window-level trait, no page.
-
-### Settings (UI)
-Nothing. `Config::save()` is fully implemented — pretty-printed JSON, directory creation (`src/config/mod.rs:138-145`) — and called from nowhere in `src/`. There is no way in the app to change interval, visible tiles, colours, quota or font. Editing requires closing the app, hand-writing JSON, and relaunching; app.rs reads the config once at startup (`src/app.rs:30`).
-
-- Next step: highest value per line of code. Add a `Settings` page that reads `Config` from `WindowState.cfg`, writes edits back with the existing `save()`, and calls `Renderer::set_metrics` (`src/taskbar/render.rs:136-145`) — which already exists for exactly this "settings edit" case, per its own comment, and also has no caller.
-- Dashboard page: new `Settings` page appended to `PAGES`.
 
 ### Adapter Config
 No adapter enumeration or selection. Throughput is the sum of every up non-loopback interface (`src/telemetry/network.rs:44-50`), and the Wi-Fi collector only reports whichever interface the WLAN API says is connected (`src/telemetry/wifi.rs:125-128`). The Windows bindings do include `Win32_NetworkManagement_IpHelper` (`Cargo.toml:15`), so `GetAdaptersAddresses` is available without a dependency change.
@@ -153,14 +148,13 @@ Nothing. No TCP/UDP table call of any kind: `grep -rE 'GetExtendedTcpTable|GetTc
 
 ## Cross-cutting finding (not an IMPROVE.md item)
 
-`src/taskbar/events.rs:71-76` handles Explorer restart by posting `WM_QUIT`, with the comment "quit and let the supervisor in `app` re-attach to the new one." **No supervisor exists** — `app::run` calls `message_loop()` once and returns (`src/app.rs:51-57`), so the process simply exits. `README.md` documents this correctly under Known limits; the code comment does not. Worth fixing the comment or adding the supervisor loop.
+`src/taskbar/events.rs` handles an Explorer restart by posting `WM_QUIT`, and the comment there used to claim a supervisor in `app` would re-attach. **No supervisor exists** — `app::run` calls `message_loop()` once and returns, so the process simply exits. The comment now says that instead of promising otherwise; `README.md` already documented it correctly under Known limits. The real fix is a re-attach loop in `app`, and it is not written.
 
 ## Suggested next
 
-Ordered by effort-to-value:
+Ordered by effort-to-value. Items 1–4 are done; what remains:
 
-1. **Settings page** — `Config::save()`, `Renderer::set_metrics()` and `UiState.cfg` all already exist and are unused; this one page unlocks theme, quota, interval, font and tile visibility that are currently hand-edit-only. Lowest effort, highest value.
-2. **Surface data already collected** — `LatencySample.loss_pct` is computed and dropped, `internet_ms` is parked behind a dead-code allow, and the gateway address is pinged but never printed. Adding Network-page rows is a display change plus wiring the 8.8.8.8 probe; near-zero risk, immediately visible.
-3. **Network Info page** — `GetAdaptersAddresses` (bindings already enabled) for local IP, gateway address, DNS and adapter name. Fills the emptiest page with the data half of Premium.
-4. **Daily/monthly Usage Stats** — append per-day records instead of overwriting `usage.json`, honour or delete the dead `Retention` config, and draw the breakdown on the Data page. The accumulator is already exact.
-5. **Speed Test** — highest value of the remaining Premium items but the only one needing a new dependency and a chosen endpoint; decide those two things before writing code.
+1. **Speed Test** — highest value of the remaining Premium items but the only one needing a new dependency and a chosen endpoint; decide those two things before writing code.
+2. **Explorer-restart supervisor** — re-attach instead of exiting, now that the comment no longer pretends it exists.
+3. **Notifier balloons** — `NIF_INFO` on the tray icon for quota and speed alerts; the icon is already installed and its tooltip already updates.
+4. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed `totals()` contract that `app` and `usage` depend on.

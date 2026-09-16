@@ -75,9 +75,15 @@ pub unsafe extern "system" fn wnd_proc(
         let state = &mut *state;
 
         if msg == state.taskbar_created {
-            // Explorer restarted and our parent taskbar is gone. We cannot
-            // rebuild ourselves from inside our own doomed message loop, so
-            // quit and let the supervisor in `app` re-attach to the new one.
+            // Explorer restarted and our parent taskbar is gone. The child
+            // window cannot outlive its parent, and we cannot rebuild
+            // ourselves from inside our own doomed message loop, so the loop
+            // is ended here and `app` returns.
+            //
+            // That means an Explorer restart ends the process: there is no
+            // supervisor that re-attaches to the new taskbar yet, so the tray
+            // display stays gone until the app is started again. Re-attaching
+            // is the fix, and it belongs in `app`, not here.
             PostQuitMessage(0);
             return LRESULT(0);
         }

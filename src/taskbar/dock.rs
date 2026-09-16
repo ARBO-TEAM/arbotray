@@ -2,8 +2,8 @@
 //!
 //! The window is created as a child of `Shell_TrayWnd`, sized to the taskbar's
 //! own height and parked immediately left of `TrayNotifyWnd` (the clock and
-//! notification area), which is the free real estate tray monitors use
-//! use. Being a real child window means the taskbar clips and moves it for us.
+//! notification area), which is the free real estate tray monitors use. Being
+//! a real child window means the taskbar clips and moves it for us.
 
 use crate::config::Config;
 use crate::taskbar::TrayModel;
