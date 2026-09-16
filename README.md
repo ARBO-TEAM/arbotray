@@ -47,7 +47,7 @@ The binary lands at `target/release/arbotray.exe` (~485 KB).
 
 ## What it shows
 
-- **Download / upload rate** — IP Helper octet counters over every live interface, delta per second
+- **Download / upload rate** — IP Helper octet counters over the live hardware interfaces, delta per second
 - **Gateway latency** — ICMP probe every 3 s, cached between probes
 - **CPU and RAM** — `GetSystemTimes` and `GlobalMemoryStatusEx`
 - **Wi-Fi band and signal** — WLAN API, e.g. `5G 78%`
@@ -76,6 +76,8 @@ A malformed colour degrades to a readable default rather than taking the tray do
 ## Data usage
 
 `%APPDATA%\ArboTray\usage.json` holds today's byte total, reset when the local date changes. Totals are diffed from the raw interface counters rather than summed from the per-second rates, so they stay exact; the file is rewritten at most every 30 s, so a hard kill costs at most that much accounting.
+
+Only the physical interfaces are counted. IP Helper also lists a row per protocol driver bound to each NIC — WFP, QoS Packet Scheduler, the Hyper-V switch extension — and every one of those rows repeats its parent NIC's counters verbatim rather than reporting its own, so a NIC with three filters bound appears four times. Summing every up row therefore multiplies the real traffic by the number of bound filters, which read as gigabytes of phantom usage from a few hundred megabytes of work.
 
 ## Single instance
 
