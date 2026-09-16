@@ -14,6 +14,29 @@ arbotray.exe
 
 It docks itself into the taskbar immediately. To quit, right-click its tray icon (next to the clock) and choose **Exit**.
 
+Or install it for the current user — no admin, no registry writes beyond the optional autostart entry:
+
+```
+powershell -ExecutionPolicy Bypass -File install.ps1
+powershell -ExecutionPolicy Bypass -File install.ps1 -Autostart   # also start with Windows
+```
+
+### Windows Defender and SmartScreen
+
+The release binary is **not code-signed**, and Defender scans it clean:
+
+```
+& "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -Scan -ScanType 3 -File .\arbotray.exe
+# found no threats
+```
+
+What you may still see is **SmartScreen**, not a detection. A downloaded copy carries the Mark-of-the-Web, and Windows warns "Windows protected your PC" for any unsigned binary whose publisher has no download reputation yet. That is a reputation question, not a malware one. Your options:
+
+- **Run it anyway** — click *More info* → *Run anyway*. One time per machine, per file.
+- **Clear the mark before running** — right-click the `.exe` → Properties → tick *Unblock* → OK.
+- **`install.ps1`** — scans with Defender first, then copies the binary into `%LOCALAPPDATA%\Programs\ArboTray\`, so nothing downloaded into a browser-tainted folder ends up on your PATH. It never disables, excludes or asks Defender to look away.
+- **Sign it** — the only way to lose the prompt entirely, for anyone shipping to machines they do not control.
+
 ## Build
 
 ```
