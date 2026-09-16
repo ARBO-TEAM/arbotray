@@ -23,6 +23,15 @@ pub struct TrayModel {
     pub latency_text: String,
     pub cpu_text: String,
     pub ram_text: String,
+    /// The router itself, e.g. `192.168.1.1`. Shown next to the gateway
+    /// latency so the number has a subject.
+    pub gateway_text: String,
+    /// Round-trip to a public resolver — the other half of "is it me or my
+    /// provider?". Separate from `latency_text`, which is the gateway.
+    pub internet_text: String,
+    /// Probe loss over the last 10 pings, e.g. `10%`. Blank until a probe has
+    /// landed: 0% of nothing is unknown, not perfect.
+    pub loss_text: String,
     /// Band and signal, e.g. `5G 78%`. The SSID is too long for the taskbar
     /// and lives in the icon's hover tooltip instead.
     pub wifi_text: String,
@@ -58,6 +67,22 @@ impl TrayModel {
                 Some(ms) => format!("{ms}ms"),
                 None => "--".into(),
             };
+        }
+        // Not gated on `cfg.show`: these three are detail for the Network page
+        // and deliberately have no tile of their own. They are absent from
+        // `render::visible_segments`, so they cannot reach the strip or the
+        // tooltip — the taskbar stays as wide as the user asked for, and the
+        // adapter detail stays one click away where it belongs.
+        if let Some(l) = &m.latency {
+            out.gateway_text = l.gateway_addr.map(format_addr).unwrap_or_default();
+            // Dashed rather than blank when the internet is unreachable:
+            // "we could not measure this" and "not switched on" are different
+            // answers and must not look the same.
+            out.internet_text = match l.internet_ms {
+                Some(ms) => format!("{ms}ms"),
+                None => "--".into(),
+            };
+            out.loss_text = l.loss_pct.map(|pct| format!("{pct}%")).unwrap_or_default();
         }
         if cfg.show.wifi {
             // No adapter (or not on Wi-Fi) stays blank rather than showing a
@@ -108,6 +133,16 @@ impl TrayModel {
     }
 }
 
+/// Dotted-quad for an address that arrived from Win32 as a `u32`.
+///
+/// The value is in network byte order, so its **bytes** are the address and its
+/// numeric value is not. `Ipv4Addr::from(u32)` would read the value big-endian
+/// and print this machine's `192.168.1.1` as `1.1.168.192`; the bytes are the
+/// only correct route. Locked by `addresses_are_read_in_network_byte_order`.
+pub fn format_addr(addr: u32) -> String {
+    std::net::Ipv4Addr::from(addr.to_ne_bytes()).to_string()
+}
+
 /// Human-friendly rate. Picks one unit and stays in it so the tray text
 /// doesn't jitter between columns while numbers are small.
 pub fn format_rate(bps: u64) -> String {
@@ -128,6 +163,37 @@ pub fn format_rate(bps: u64) -> String {
 mod tests {
     use super::*;
     use crate::telemetry::{HardwareSample, LatencySample, NetSample};
+
+    /// The exact `S_addr` this machine's router returns for the value
+    /// `ipconfig` prints as `192.168.1.1`. If someone "simplifies"
+    /// `format_addr` back to `Ipv4Addr::from(addr)` the gateway reads
+    /// `1.1.168.192` and this fails.
+    #[test]
+    fn addresses_are_read_in_network_byte_order() {
+        assert_eq!(format_addr(0x0101_a8c0), "192.168.1.1");
+        assert_eq!(format_addr(0), "0.0.0.0");
+    }
+
+    #[test]
+    fn unreachable_internet_is_dashed_not_blank() {
+        // These three are page detail with no tile of their own, so the
+        // default config is what a user actually has.
+        let cfg = Config::default();
+        let m = Metric {
+            latency: Some(LatencySample {
+                gateway_addr: Some(0x0101_a8c0),
+                gateway_ms: Some(4),
+                internet_ms: None,
+                loss_pct: None,
+            }),
+            ..Default::default()
+        };
+        let model = TrayModel::from_metric(&m, &cfg);
+        assert_eq!(model.gateway_text, "192.168.1.1");
+        assert_eq!(model.internet_text, "--");
+        // No probe has landed yet, so loss is unknown — not 0%.
+        assert_eq!(model.loss_text, "");
+    }
 
     #[test]
     fn rates_pick_a_sane_unit() {

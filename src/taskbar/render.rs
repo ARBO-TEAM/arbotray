@@ -393,6 +393,7 @@ mod tests {
             usage_text: "1.4G".into(),
             quota_alert: false,
             history: Vec::new(),
+            ..Default::default()
         };
         assert_eq!(
             visible_segments(&model),

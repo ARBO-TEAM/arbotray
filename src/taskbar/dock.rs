@@ -278,6 +278,12 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         latency_text: field(cfg.show.latency, "9999ms"),
         cpu_text: field(cfg.show.cpu, "100%"),
         ram_text: field(cfg.show.ram, "100%"),
+        // Empty on purpose: the gateway, internet and loss readings are Network
+        // page detail with no tile of their own. Reserving width for text that
+        // never draws would just make the taskbar wider for nothing.
+        gateway_text: String::new(),
+        internet_text: String::new(),
+        loss_text: String::new(),
         wifi_text: field(cfg.show.wifi, "6G 100%"),
         wifi_name: None,
         usage_text: field(cfg.show.usage, "9999.9G"),

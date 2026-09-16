@@ -60,6 +60,12 @@ pub struct WifiSample {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LatencySample {
+    /// The default gateway itself, in network byte order — its *bytes* are the
+    /// address, its numeric value is not. Format it through
+    /// `TrayModel::format_addr`, never with `Ipv4Addr::from(u32)`, which reads
+    /// the value big-endian and prints `192.168.1.1` as `1.1.168.192`. Knowing
+    /// which router answered is what makes `gateway_ms` a reading.
+    pub gateway_addr: Option<u32>,
     /// Round-trip to the default gateway.
     pub gateway_ms: Option<u32>,
     /// Round-trip to a public resolver.

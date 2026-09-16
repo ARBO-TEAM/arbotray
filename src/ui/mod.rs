@@ -792,7 +792,12 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
             push("Wi-Fi", &model.wifi_text);
             push("Download", &model.down_text);
             push("Upload", &model.up_text);
+            push("Gateway", &model.gateway_text);
             push("Latency", &model.latency_text);
+            // Right after the gateway it depends on: they are read together to
+            // tell a local fault from a provider one.
+            push("Internet", &model.internet_text);
+            push("Loss", &model.loss_text);
         }
         SYSTEM => {
             push("CPU", &model.cpu_text);
@@ -1572,6 +1577,9 @@ mod tests {
             latency_text: "8ms".into(),
             cpu_text: "12%".into(),
             ram_text: "44%".into(),
+            gateway_text: "192.168.1.1".into(),
+            internet_text: "14ms".into(),
+            loss_text: "0%".into(),
             wifi_text: "5G 78%".into(),
             wifi_name: Some("HomeNet".into()),
             usage_text: "1.4G".into(),
@@ -1820,8 +1828,25 @@ mod tests {
         // The whole reason the network information is worth a page: it was
         // competing with the numbers people actually open the window for.
         let net = labels(NETWORK, &full());
-        assert_eq!(net, vec!["Network", "Wi-Fi", "Download", "Upload", "Latency"]);
-        assert!(!labels(OVERVIEW, &full()).contains(&"Network"));
+        assert_eq!(
+            net,
+            vec![
+                "Network",
+                "Wi-Fi",
+                "Download",
+                "Upload",
+                "Gateway",
+                "Latency",
+                "Internet",
+                "Loss"
+            ]
+        );
+        // None of that detail may leak onto the page people open for the
+        // numbers — that was the point of giving it a page at all.
+        let overview = labels(OVERVIEW, &full());
+        for leaked in ["Network", "Wi-Fi", "Gateway", "Internet", "Loss"] {
+            assert!(!overview.contains(&leaked), "{leaked} leaked onto Overview");
+        }
     }
 
     #[test]

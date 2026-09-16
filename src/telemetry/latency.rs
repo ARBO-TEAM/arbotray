@@ -24,6 +24,12 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(3);
 /// probe costs one stalled poll, not one per second.
 const PROBE_TIMEOUT_MS: u32 = 1000;
 
+/// Per-probe reply timeout for the *second* ping in a poll. It is additive to
+/// [`PROBE_TIMEOUT_MS`] rather than competing with it, so a dead WAN costs a
+/// quarter second instead of doubling the worst-case stall. Ample for a reply
+/// that normally lands in tens of milliseconds.
+const INTERNET_TIMEOUT_MS: u32 = 250;
+
 /// Probes kept for the loss percentage.
 const WINDOW: usize = 10;
 
@@ -90,7 +96,11 @@ fn default_gateway() -> Option<u32> {
 }
 
 /// One ICMP echo. `Some(ms)` on a reply, `None` on timeout, error or no route.
-fn ping(handle: windows::Win32::Foundation::HANDLE, target: u32) -> Option<u32> {
+fn ping(
+    handle: windows::Win32::Foundation::HANDLE,
+    target: u32,
+    timeout_ms: u32,
+) -> Option<u32> {
     // 32 bytes of payload plus room for the reply header, as documented.
     let payload = [0u8; 32];
     let mut reply = [0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + 32 + 8];
@@ -106,7 +116,7 @@ fn ping(handle: windows::Win32::Foundation::HANDLE, target: u32) -> Option<u32> 
             None::<*const IP_OPTION_INFORMATION>,
             reply.as_mut_ptr().cast(),
             reply.len() as u32,
-            PROBE_TIMEOUT_MS,
+            timeout_ms,
         )
     };
     if replied == 0 {
@@ -170,17 +180,21 @@ impl Latency {
         let handle = self.handle?;
         let Some(gateway) = default_gateway() else {
             self.record_outcome(false);
-            let sample = self.sample(None, None);
+            let sample = self.sample(None, None, None);
             self.cached = Some((sample, now));
             return Some(sample);
         };
 
-        let gateway_ms = ping(handle, gateway);
+        let gateway_ms = ping(handle, gateway, PROBE_TIMEOUT_MS);
         self.record_outcome(gateway_ms.is_some());
 
-        // ponytail: an internet probe would double the worst-case stall, and
-        // the taskbar only renders `gateway_ms`. Left `None` deliberately.
-        let sample = self.sample(gateway_ms, None);
+        // Both are reported rather than one standing in for the other: an
+        // unreachable gateway with no internet is a local fault, while a
+        // healthy gateway with no internet is the provider's — and the
+        // difference is the only reason anyone opens this page.
+        let internet_ms = ping(handle, INTERNET_TARGET, INTERNET_TIMEOUT_MS);
+
+        let sample = self.sample(Some(gateway), gateway_ms, internet_ms);
         self.cached = Some((sample, now));
         Some(sample)
     }
@@ -189,20 +203,19 @@ impl Latency {
         record(&mut self.window, hit);
     }
 
-    fn sample(&self, gateway_ms: Option<u32>, internet_ms: Option<u32>) -> LatencySample {
+    fn sample(
+        &self,
+        gateway_addr: Option<u32>,
+        gateway_ms: Option<u32>,
+        internet_ms: Option<u32>,
+    ) -> LatencySample {
         LatencySample {
+            gateway_addr,
             gateway_ms,
             internet_ms,
             loss_pct: loss_pct(&self.window),
         }
     }
-}
-
-/// Unused target kept for the day `internet_ms` is wired up; referencing it
-/// here keeps the constant honest without emitting dead-code noise.
-#[allow(dead_code)]
-fn internet_target() -> u32 {
-    INTERNET_TARGET
 }
 
 #[cfg(test)]
