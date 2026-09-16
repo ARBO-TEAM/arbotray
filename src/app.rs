@@ -6,8 +6,10 @@
 //! with a `PostMessageW` so nothing has to poll on a timer.
 
 use crate::config::{Config, interval_duration};
-use crate::taskbar::{Tray, TrayModel};
+use crate::taskbar::dock::AttachResult;
+use crate::taskbar::{Notifier, Tray, TrayModel};
 use crate::telemetry::{Sampler, SpeedTest};
+use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::core::w;
@@ -34,7 +36,7 @@ pub fn run() -> i32 {
     // dashboard, which starts runs.
     let speed = SpeedTest::new();
 
-    let (tray, notifier) = match Tray::attach(&cfg, speed.clone()) {
+    let (tray, notifier) = match attach_with_retry(&cfg, speed.clone()) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("arbotray: cannot attach to taskbar: {e}");
@@ -57,6 +59,34 @@ pub fn run() -> i32 {
         return 1;
     }
     0
+}
+
+/// How long to keep looking for the taskbar, and how often to look again.
+///
+/// The first attempt is immediate, so a normal launch is unchanged. The wait is
+/// for one launch path only: started by Windows at logon, this process can be
+/// running before Explorer has created `Shell_TrayWnd`. A single attempt would
+/// fail there, return 1, and — under `windows_subsystem = "windows"` — do it
+/// with nothing on screen, so Start with Windows would look like it did nothing
+/// at all. A scheduled task could instead delay the launch, which is what the
+/// reference implementation does; waiting here is the same fix without needing
+/// one, and it also covers Explorer being restarted later.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(20);
+const ATTACH_RETRY: Duration = Duration::from_millis(250);
+
+/// `Tray::attach`, retried until the taskbar exists or the deadline passes.
+///
+/// The last error is what comes back, so a genuine failure still names itself
+/// rather than reporting the first sighting.
+fn attach_with_retry(cfg: &Config, speed: SpeedTest) -> AttachResult<(Tray, Notifier)> {
+    let deadline = std::time::Instant::now() + ATTACH_TIMEOUT;
+    loop {
+        match Tray::attach(cfg, speed.clone()) {
+            Ok(pair) => return Ok(pair),
+            Err(e) if std::time::Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(ATTACH_RETRY),
+        }
+    }
 }
 
 /// Polls forever, pushing a freshly formatted model on each tick.
