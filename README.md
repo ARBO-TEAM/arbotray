@@ -1,8 +1,18 @@
 # ArboTray
 
-Ultra-light native Windows taskbar monitor: network speed, latency, CPU and RAM, rendered directly inside the taskbar next to the clock.
+Ultra-light native Windows taskbar monitor: network speed, latency, hardware usage and data-plan burn, rendered directly inside the taskbar next to the clock.
 
-Pure Rust, native Win32 — target binary < 3 MB, no garbage collection, no console subsystem.
+Pure Rust, native Win32 — target binary < 3 MB, no garbage collection, no console subsystem. Every feature is free; nothing is gated.
+
+## Install
+
+Grab the latest binary from [Releases](../../releases/latest) and run it. It is a single self-contained `.exe` — no installer, no runtime, no dependencies.
+
+```
+arbotray.exe
+```
+
+It docks itself into the taskbar immediately. To quit, right-click its tray icon (next to the clock) and choose **Exit**.
 
 ## Build
 
@@ -10,16 +20,37 @@ Pure Rust, native Win32 — target binary < 3 MB, no garbage collection, no cons
 cargo build --release
 ```
 
-The binary lands at `target/release/arbotray.exe` (~236 KB). Run it; it docks itself into the taskbar and shows:
+The binary lands at `target/release/arbotray.exe` (~250 KB).
 
-- download / upload rate (IP Helper octet counters, delta per second)
-- gateway latency + packet loss (ICMP probe every 3 s, cached between probes)
-- CPU load (`GetSystemTimes`) and RAM usage (`GlobalMemoryStatusEx`)
-- optional mini-sparkline of recent download throughput
+## What it shows
+
+- **Download / upload rate** — IP Helper octet counters over every live interface, delta per second
+- **Gateway latency** — ICMP probe every 3 s, cached between probes
+- **CPU and RAM** — `GetSystemTimes` and `GlobalMemoryStatusEx`
+- **Wi-Fi band and signal** — WLAN API, e.g. `5G 78%`
+- **Today's data usage** — running total, in the taskbar and in the icon tooltip
+- **Mini-sparkline** — recent download throughput
+
+Hovering the tray icon shows the full readout plus the connected network name, which is the one field too long for the taskbar.
 
 ## Config
 
-`%APPDATA%\ArboTray\config.json` — created on demand, loaded with defaults when missing or corrupt. Fields: which tiles to show, poll interval, colours (`#RRGGBB`), font size, opacity (0 = sample the taskbar background), and history retention.
+`%APPDATA%\ArboTray\config.json` — created on demand, loaded with defaults when missing or corrupt (a bad file is kept as `config.json.bad`).
+
+| Key | Meaning |
+| --- | --- |
+| `show.*` | Which tiles to draw: `net_down`, `net_up`, `latency`, `cpu`, `ram`, `wifi`, `usage`, `sparkline` |
+| `interval_ms` | Poll period, clamped to 100–10000 |
+| `theme.foreground` / `background` | `#RRGGBB` |
+| `theme.alert` | Colour for the whole run once the data plan is exceeded |
+| `theme.font_size`, `theme.opacity` | Point size; `opacity: 0` samples the taskbar background |
+| `quota_gb` | Monthly allowance. `0` disables the over-quota warning |
+
+A malformed colour degrades to a readable default rather than taking the tray down.
+
+## Data usage
+
+`%APPDATA%\ArboTray\usage.json` holds today's byte total, reset when the local date changes. Totals are diffed from the raw interface counters rather than summed from the per-second rates, so they stay exact; the file is rewritten at most every 30 s, so a hard kill costs at most that much accounting.
 
 ## Single instance
 
@@ -28,9 +59,13 @@ A named mutex (`ArboTray.SingleInstance`) guards against a second copy.
 ## Known limits
 
 - Taskbar children cannot be layered windows (`WS_EX_LAYERED` is refused by `Shell_TrayWnd`), so "transparent" is done by sampling the taskbar background colour — visibly wrong only over taskbar wallpapers or acrylic.
-- 6 GHz Wi-Fi detection: the WLAN API exposes only a channel number, whose ranges collide between 5/6 GHz; only channels above 177 are classified as 6 GHz.
-- If Explorer restarts, the tray exits cleanly and a supervisor re-attach is planned (the `TaskbarCreated` hook is in place).
+- 6 GHz Wi-Fi detection: the WLAN API exposes only a channel number, whose ranges collide between the 5 and 6 GHz bands; only channels above 177 are classified as 6 GHz.
+- Data usage is machine-wide. Windows exposes no per-process byte counter without ETW, so there is no per-app breakdown.
+- If Explorer restarts, the tray exits cleanly; re-attaching to the new taskbar is not implemented.
 
 ## CI
 
-GitHub Actions on `windows-latest`: check, test, release build, artifact upload.
+GitHub Actions on `windows-latest`:
+
+- `ci.yml` — check, test, release build, artifact upload, on every push and PR
+- `release.yml` — on a `v*` tag, tests, builds, and publishes a GitHub release with the versioned `.exe` attached

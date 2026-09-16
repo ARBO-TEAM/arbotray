@@ -1,6 +1,6 @@
 [package]
 name = "arbotray"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Ultra-light native Windows taskbar monitor: network speed, latency, hardware usage"
 
