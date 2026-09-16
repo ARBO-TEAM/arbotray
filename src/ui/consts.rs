@@ -80,6 +80,17 @@ pub(crate) const SET_AUTOSTART: i32 = SET_ID_BASE + 22;
 /// the dashboard cannot create a window the tray owns — see `ui::update`.
 pub(crate) const SET_WIDGET: i32 = SET_ID_BASE + 23;
 
+/// The colour fields' Pick buttons.
+///
+/// One per colour row, each opening the system colour dialog seeded from the
+/// text already in the box beside it. They are three controls rather than one
+/// shared button because a single button would have to know which field it was
+/// editing, and "whichever one was focused last" is wrong on the first click
+/// after a tab — the dialog would open on a colour the user was not looking at.
+pub(crate) const SET_PICK_BG: i32 = SET_ID_BASE + 24;
+pub(crate) const SET_PICK_FG: i32 = SET_ID_BASE + 25;
+pub(crate) const SET_PICK_ALERT: i32 = SET_ID_BASE + 26;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings
@@ -108,10 +119,27 @@ pub(crate) const CTL_NUDGE: i32 = 3;
 /// column is narrow enough that a proportional field would clip `#E6E6E6`.
 pub(crate) const FIELD_W: i32 = 150;
 
-/// The taskbar tiles' checkbox labels, in `TILE_IDS` order. They are the
-/// config file's own field names, so what the page shows is what the file says.
+/// Width of a Pick button. A word rather than a field's worth of room, which
+/// is what lets it sit beside the colour box without reading as a second
+/// field the user is meant to type in.
+pub(crate) const PICK_W: i32 = 54;
+
+/// The taskbar tiles' checkbox labels, in `TILE_IDS` order.
+///
+/// Worded for the person ticking them rather than after the config keys they
+/// set: the field names were doing double duty as the page's only description
+/// of what a tile *is*, and `sparkline` and `net_down` name the implementation,
+/// not the thing on the taskbar. `tile_flags` is the mapping back to `Show`, so
+/// nothing here has to match the file to stay correct.
 pub(crate) const TILE_LABELS: [&str; 8] = [
-    "net_down", "net_up", "latency", "cpu", "ram", "wifi", "usage", "sparkline",
+    "Download",
+    "Upload",
+    "Latency",
+    "CPU",
+    "Memory",
+    "Wi-Fi",
+    "Data used",
+    "Graph",
 ];
 
 /// The cursor left the window.

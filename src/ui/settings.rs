@@ -4,16 +4,17 @@ use crate::config::{
     Config, QUOTA_MAX_GB, QUOTA_MIN_GB, clamp_font_size, clamp_interval_ms, clamp_quota_gb,
 };
 use crate::ui::consts::{
-    BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG, SET_FONT,
-    SET_INTERVAL, SET_OPACITY, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP,
-    SET_WATCH, SET_WATCH_RESET, SET_WIDGET, TILE_IDS, TILE_LABELS, WM_ENABLE,
+    BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, PICK_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG,
+    SET_FONT, SET_INTERVAL, SET_OPACITY, SET_PICK_ALERT, SET_PICK_BG, SET_PICK_FG, SET_QUOTA,
+    SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_WATCH, SET_WATCH_RESET, SET_WIDGET,
+    TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::ui::low_word;
 use crate::ui::stopwatch::Stopwatch;
 use crate::ui::theme::{scale, sidebar_w};
 use crate::ui::UiState;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CreateWindowExW, ES_AUTOHSCROLL,
@@ -234,6 +235,61 @@ pub(crate) fn parse_f64(text: Option<&str>) -> Option<f64> {
     text?.trim().parse().ok()
 }
 
+/// `#RRGGBB` for a `COLORREF`, which is `0x00BBGGRR` — the exact inverse of
+/// `render::parse_color`, and the spelling the config file already holds.
+pub(crate) fn format_color(c: COLORREF) -> String {
+    let (r, g, b) = (c.0 & 0xFF, (c.0 >> 8) & 0xFF, (c.0 >> 16) & 0xFF);
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// Open the system colour dialog on one of the colour boxes, and write the
+/// answer back as `#RRGGBB`.
+///
+/// Seeded from whatever the box already holds, so opening the dialog and
+/// pressing OK is never a way to lose a colour. A box holding something this
+/// cannot read seeds from white: an unparseable colour has no better guess
+/// available here, and opening on black when the page is dark would suggest the
+/// dialog had read the setting rather than given up on it.
+///
+/// Returns whether the box was written. A dismissed dialog writes nothing —
+/// including `Cancel`, which must not be a way to blank a field.
+pub(crate) fn choose_color(hwnd: HWND, box_id: i32) -> bool {
+    use windows::Win32::UI::Controls::Dialogs::{
+        CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW,
+    };
+
+    let seeded = text_of(hwnd, box_id)
+        .as_deref()
+        .and_then(crate::taskbar::render::parse_color)
+        .unwrap_or(COLORREF(0x00FF_FFFF));
+    // The sixteen custom swatches the dialog keeps. Required to be present —
+    // `lpCustColors` is not optional — and rebuilt on every call, so the dialog
+    // shows its defaults rather than whatever an earlier visit happened to
+    // leave, which is the same colour set every time this is opened.
+    let mut custom = [COLORREF(0x00FF_FFFF); 16];
+    let mut cc = CHOOSECOLORW {
+        lStructSize: size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: hwnd,
+        rgbResult: seeded,
+        lpCustColors: custom.as_mut_ptr(),
+        // `CC_FULLOPEN` so the palette is there without the user having to
+        // reach for "Define Custom Colors", which is the whole point of the
+        // button.
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
+    };
+
+    // SAFETY: `cc` is a live local of the type the call expects, `hwnd` is our
+    // own live window, and `custom` outlives the call — the dialog writes into
+    // it and does not keep the pointer.
+    let picked = unsafe { ChooseColorW(&mut cc) };
+    if !picked.as_bool() {
+        return false;
+    }
+    set_text(hwnd, box_id, &format_color(cc.rgbResult));
+    true
+}
+
 /// `None` when the field holds something that is not a number, which every
 /// caller treats as "unusable" rather than as zero.
 pub(crate) fn parse_int(text: Option<&str>) -> Option<i32> {
@@ -343,6 +399,12 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_AUTOSTART);
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_WIDGET);
     let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
+    // One per colour row, sitting after the box it edits. Labelled for the
+    // action rather than the colour, because the colour is the thing that
+    // changes and a button that named it would be wrong the moment it worked.
+    for (id, _) in PICK_TARGETS {
+        create_control(parent, state, w!("BUTTON"), "Pick", button_style, id);
+    }
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
     // The Speed Test page's, and the one control here that does not belong to
@@ -402,29 +464,46 @@ pub(crate) const TILE_COLS: usize = 2;
 /// column beside it.
 pub(crate) const FIELD_GAP: i32 = 10;
 
-/// Rows the whole settings page occupies. The tile grid takes the first four;
-/// every labelled field under it takes one more, and Save takes the last.
-pub(crate) const ROW_REFRESH: usize = 4;
-pub(crate) const ROW_PLAN: usize = 5;
-pub(crate) const ROW_FONT: usize = 6;
-pub(crate) const ROW_BG: usize = 7;
-pub(crate) const ROW_FG: usize = 8;
-pub(crate) const ROW_ALERT: usize = 9;
-pub(crate) const ROW_OPACITY: usize = 10;
-pub(crate) const ROW_STARTUP: usize = 11;
-pub(crate) const ROW_WIDGET: usize = 12;
-pub(crate) const ROW_SAVE: usize = 13;
+/// The caption column: how far in from the content edge a field control starts.
+///
+/// Load-bearing rather than cosmetic. `paint` draws each caption at the content
+/// edge and the frame carries `WS_CLIPCHILDREN`, so a control placed at that
+/// same edge is painted over its own label — it is clipped, not truncated, and
+/// the page then shows a column of boxes with nothing to say what they are.
+/// Every caption in `SET_ROW_LABELS` is written to fit this width.
+pub(crate) const LABEL_W: i32 = 150;
+
+/// Rows the whole settings page occupies. The tile grid takes the first four,
+/// a divider takes the fifth, and every labelled field under it takes one more.
+///
+/// The divider's own row is the one band on this page that is neither a control
+/// nor a caption, which is why it is named: the grid above it and the form below
+/// it are two different kinds of thing, and the rule is the only mark on the
+/// page that says so.
+pub(crate) const ROW_DIVIDER: usize = 4;
+pub(crate) const ROW_REFRESH: usize = 5;
+pub(crate) const ROW_PLAN: usize = 6;
+pub(crate) const ROW_FONT: usize = 7;
+pub(crate) const ROW_BG: usize = 8;
+pub(crate) const ROW_FG: usize = 9;
+pub(crate) const ROW_ALERT: usize = 10;
+pub(crate) const ROW_OPACITY: usize = 11;
+pub(crate) const ROW_STARTUP: usize = 12;
+pub(crate) const ROW_WIDGET: usize = 13;
+pub(crate) const ROW_SAVE: usize = 14;
 pub(crate) const SET_ROW_COUNT: usize = ROW_SAVE + 1;
 
 /// The Settings page's captions, one per row in paint order, with whatever a
 /// bare number would not say for itself. The four rows the tile grid occupies
-/// have no caption of their own — a checkbox carries its own label — so they
-/// are empty strings rather than a shorter array with an offset to get wrong.
+/// and the divider's row have no caption of their own — a checkbox carries its
+/// own label, and a rule carries none — so they are empty strings rather than a
+/// shorter array with an offset to get wrong.
 ///
 /// This is the page's own extension point, the way `page_rows` is for the
 /// metric pages: `page_rows` returns nothing here because the page has no
 /// metric on it, and every line a user reads is declared in this array.
 pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
+    "",
     "",
     "",
     "",
@@ -443,7 +522,7 @@ pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
 
 /// Which row each non-tile control belongs on. One table drives both the layout
 /// and the captions, so a control cannot end up under the wrong line.
-pub(crate) const FIELD_ROWS: [(i32, usize); 12] = [
+pub(crate) const FIELD_ROWS: [(i32, usize); 15] = [
     (SET_INTERVAL, ROW_REFRESH),
     (SET_QUOTA_ON, ROW_PLAN),
     (SET_QUOTA, ROW_PLAN),
@@ -456,6 +535,9 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 12] = [
     (SET_WIDGET, ROW_WIDGET),
     (SET_SAVE, ROW_SAVE),
     (SET_RESET, ROW_SAVE),
+    (SET_PICK_BG, ROW_BG),
+    (SET_PICK_FG, ROW_FG),
+    (SET_PICK_ALERT, ROW_ALERT),
 ];
 
 /// The controls that sit in the value column rather than at the field's own
@@ -463,6 +545,33 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 12] = [
 /// are the pair; the plan's switch and number are the other.
 pub(crate) fn right_hand_control(id: i32) -> bool {
     matches!(id, SET_RESET | SET_QUOTA)
+}
+
+/// Whether a control is one of the colour fields' Pick buttons, which take a
+/// word's width rather than a field's. Kept apart from `right_hand_control`
+/// because the two answer different questions — that one says *which side of
+/// the row*, this one says *how much of it* — and a button that is both would
+/// have to be right for the wrong reason.
+pub(crate) fn pick_button(id: i32) -> bool {
+    matches!(id, SET_PICK_BG | SET_PICK_FG | SET_PICK_ALERT)
+}
+
+/// The colour field a Pick button edits: `(button, box, which colour)`. One
+/// table, read by both the click handler and the tests, so a button wired to
+/// the wrong box is a row that fails rather than a dialog that quietly edits
+/// the foreground when the user asked for the alert colour.
+pub(crate) const PICK_TARGETS: [(i32, i32); 3] = [
+    (SET_PICK_BG, SET_BG),
+    (SET_PICK_FG, SET_FG),
+    (SET_PICK_ALERT, SET_ALERT),
+];
+
+/// The edit box one of the colour dialogs writes back to.
+pub(crate) fn pick_target(button: i32) -> Option<i32> {
+    PICK_TARGETS
+        .iter()
+        .find(|(pick, _)| *pick == button)
+        .map(|(_, box_id)| *box_id)
 }
 
 /// Which grid slot a tile's checkbox takes: the row under row 0, and the
@@ -521,7 +630,9 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         let _ = h;
 
         let field_w = scale(FIELD_W, state.dpi);
+        let pick_w = scale(PICK_W, state.dpi);
         let gap = scale(FIELD_GAP, state.dpi);
+        let field_x = x0 + scale(LABEL_W, state.dpi);
 
         for (i, id) in TILE_IDS.iter().enumerate() {
             let (row, col) = tile_slot(i);
@@ -531,13 +642,17 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
 
         for (id, row) in FIELD_ROWS {
             let y = top + row_h * row as i32 + nudge;
-            // The two right-hand controls share their row with the field that
+            // The second and third controls on a row sit past the field that
             // owns it: the plan's switch says whether the number beside it means
-            // anything, and Reload sits next to the Save it undoes.
-            let (left, width) = if right_hand_control(id) {
-                (x0 + field_w + gap, field_w)
+            // anything, Reload sits next to the Save it undoes, and a Pick button
+            // sits after the colour box it edits — narrow, so the three read as
+            // one row rather than as two fields with a gap between them.
+            let (left, width) = if pick_button(id) {
+                (field_x + field_w + gap, pick_w)
+            } else if right_hand_control(id) {
+                (field_x + field_w + gap, field_w)
             } else {
-                (x0, field_w)
+                (field_x, field_w)
             };
             place(hwnd, id, left, y, width, ctl_h);
         }

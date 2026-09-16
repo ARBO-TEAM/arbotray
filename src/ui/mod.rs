@@ -65,6 +65,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HBRUSH, HGDIOBJ, HFONT, InvalidateRect,
     PAINTSTRUCT, SetBkColor, SetTextColor,
 };
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
 };
@@ -79,7 +80,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW,
 };
 use crate::telemetry::SpeedTest;
-use windows::core::w;
+use windows::core::PCWSTR;
 
 pub(crate) struct UiState {
     model: TrayModel,
@@ -259,28 +260,43 @@ pub fn ensure(
 
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let x = if screen_w > START_W {
-            (screen_w - START_W) / 2
+        let style = WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_CLIPCHILDREN.0);
+        let ex_style = WINDOW_EX_STYLE(0);
+        // Centred on the size that will actually be created, not on the client
+        // size: centring on `START_W`/`START_H` put the window 39 pixels off
+        // centre on both axes.
+        let (win_w, win_h) = outer_size(style, ex_style, GetDpiForSystem());
+        let x = if screen_w > win_w {
+            (screen_w - win_w) / 2
         } else {
             CW_USEDEFAULT
         };
-        let y = if screen_h > START_H {
-            (screen_h - START_H) / 2
+        let y = if screen_h > win_h {
+            (screen_h - win_h) / 2
         } else {
             CW_USEDEFAULT
         };
 
+        // Built rather than a literal so the caption names the build. The first
+        // question about any screenshot of this window is which version drew it,
+        // and the answer was previously nowhere on screen. It outlives the call:
+        // `CreateWindowExW` copies the string into the window's own storage.
+        let caption: Vec<u16> = format!("ArboTray {}", crate::update::current())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
-            w!("ArboTray"),
+            PCWSTR(caption.as_ptr()),
             // `WS_CLIPCHILDREN` keeps the parent's repaints out of the sidebar,
             // which is what stops the list flickering once per sample.
-            WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_CLIPCHILDREN.0),
+            style,
             x,
             y,
-            START_W,
-            START_H,
+            win_w,
+            win_h,
             None,
             None,
             Some(instance),
@@ -290,6 +306,32 @@ pub fn ensure(
     };
 
     Some(hwnd)
+}
+
+/// The window size that gives a `START_W`-by-`START_H` client area.
+///
+/// Every metric in `layout` is a measurement of the *client* area — `START_H` is
+/// the room the last settings band needs, counted from the top of the client
+/// area — but `CreateWindowExW` takes the size of the whole window. Passing the
+/// layout's own numbers straight through opened the window a caption and two
+/// borders short of what the layout believed it had, which put the Save row 16
+/// pixels under the frame's bottom edge and left nothing that could notice: the
+/// test asserts against `START_H` and `START_H` was right.
+fn outer_size(style: WINDOW_STYLE, ex_style: WINDOW_EX_STYLE, dpi: u32) -> (i32, i32) {
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: scale(START_W, dpi),
+        bottom: scale(START_H, dpi),
+    };
+    // SAFETY: a `RECT` in and out, with no window or handle involved, so there
+    // is nothing here to fail beyond a style the API does not recognise — in
+    // which case the frame's own size is the whole of the correction and the
+    // rectangle comes back unchanged.
+    unsafe {
+        let _ = AdjustWindowRectExForDpi(&mut r, style, false, ex_style, dpi);
+    }
+    (r.right - r.left, r.bottom - r.top)
 }
 
 /// Bring the window up, restoring it if it was minimised.
@@ -443,7 +485,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             if !create.is_null() {
                 let state = (*create).lpCreateParams as *mut UiState;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
-                return LRESULT(1);
+                // Deliberately no early return. `DefWindowProcW` is the call
+                // that copies `lpszName` out of the `CREATESTRUCTW` and into
+                // the window, so answering TRUE here left every window this
+                // file creates — dashboard and widget alike — captioned with an
+                // empty string, which is why the version in the title bar was
+                // never once on screen.
             }
         }
 
@@ -507,6 +554,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             s.notice = Some("could not change the startup entry".into());
                         }
                         repaint_after_settings(hwnd, s);
+                    } else if let Some(box_id) = pick_target(id) {
+                        // Modal to this window, so the page cannot be edited
+                        // while it is up. A dismissal writes nothing: `Cancel`
+                        // must not be a way to blank a colour field, and the
+                        // dialog is asked for on the strength of a colour the
+                        // user already has.
+                        if choose_color(hwnd, box_id) {
+                            // The notice described the last save, and this makes
+                            // the page differ from disk — the same reason the
+                            // quota switch clears it.
+                            s.notice = None;
+                        }
                     } else if id == SET_SAVE {
                         let notice = save_settings(hwnd, s);
                         s.notice = Some(notice);
@@ -1239,6 +1298,53 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_survives_a_round_trip_through_the_picker() {
+        // `format_color` is the inverse of `render::parse_color`, and the two
+        // are written out separately because one is the config's spelling and
+        // the other is GDI's — so a wrong shift in either shows up here as a
+        // colour that comes back as itself and still looks wrong on screen.
+        for text in ["#FF8000", "#000000", "#FFFFFF", "#123456", "#0A0B0C"] {
+            let parsed = crate::taskbar::render::parse_color(text).expect(text);
+            assert_eq!(super::settings::format_color(parsed), text, "{text}");
+        }
+        // And the case that would be invisible in a round trip: channel order.
+        // `#FF8000` is orange, and a swapped one is blue.
+        let orange = crate::taskbar::render::parse_color("#FF8000").unwrap();
+        assert_eq!(orange.0 & 0xFF, 0xFF, "red must land in the low byte");
+        assert_eq!((orange.0 >> 16) & 0xFF, 0x00, "blue must land in the high byte");
+    }
+
+    #[test]
+    fn every_pick_button_edits_a_colour_box_that_is_on_the_page() {
+        // A button wired to the wrong box, or to an id no control was created
+        // with, is a dialog that opens and then does nothing — which reads as a
+        // broken button rather than as a wiring mistake.
+        let mut boxes: Vec<i32> = Vec::new();
+        for (button, box_id) in PICK_TARGETS {
+            assert_eq!(pick_target(button), Some(box_id));
+            assert!(
+                FIELD_ROWS.iter().any(|(id, _)| *id == box_id),
+                "the box {box_id} behind button {button} is never laid out"
+            );
+            assert!(
+                FIELD_ROWS.iter().any(|(id, _)| *id == button),
+                "button {button} is never laid out"
+            );
+            assert!(pick_button(button), "button {button} is not laid out as one");
+            boxes.push(box_id);
+        }
+        // Three buttons, three different colours.
+        boxes.sort_unstable();
+        boxes.dedup();
+        assert_eq!(boxes.len(), PICK_TARGETS.len());
+        // A control that is not a pick button must not claim to be one, or the
+        // layout gives a field a button's width.
+        assert!(!pick_button(SET_SAVE));
+        assert!(!pick_button(SET_BG));
+        assert_eq!(pick_target(SET_SAVE), None);
+    }
+
+    #[test]
     fn the_form_keeps_a_plan_of_zero_switched_off() {
         // `quota_gb == 0.0` is the config's own "no plan", so the page has to
         // show it as the switch being off and write it back as zero — not as
@@ -1572,6 +1678,24 @@ mod tests {
             last + ROW_H < START_H,
             "START_H {START_H} leaves the last row ({last}) no room"
         );
+    }
+
+    #[test]
+    fn the_window_is_sized_for_its_client_area_not_its_frame() {
+        // The bug this catches: `START_W`/`START_H` are client-area metrics —
+        // `form_top` counts them from the top of the client area — but
+        // `CreateWindowExW` takes the size of the whole window. Passing them
+        // straight through opened the window a caption and two borders short of
+        // what the layout believed it had, which put the Save row 16 pixels
+        // under the bottom edge. Nothing in the layout can notice, because the
+        // layout is right; only the conversion to an outer size was missing.
+        let style = WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 | WS_CLIPCHILDREN.0);
+        let (w, h) = outer_size(style, WINDOW_EX_STYLE(0), 96);
+        assert!(h > START_H, "outer height {h} must exceed the client {START_H}");
+        assert!(w > START_W, "outer width {w} must exceed the client {START_W}");
+        // A caption bar is not incidental: if this ever came back equal, the
+        // call had stopped adjusting and the frame is being drawn over again.
+        assert!(h - START_H > 20, "room for the caption bar, got {}", h - START_H);
     }
 
     #[test]

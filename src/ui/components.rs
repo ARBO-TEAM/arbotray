@@ -315,6 +315,24 @@ impl<'a> Canvas<'a> {
         self.y += self.row_h;
     }
 
+    /// A faint rule on a band of its own, dividing the rows above it from the
+    /// rows below.
+    ///
+    /// The counterpart of `section` for a group whose heading is already
+    /// painted: a `section` caption is a component's own text, drawn at the
+    /// content edge, while the Settings page's captions sit *behind* a control
+    /// at that same edge and would be covered by it. This draws the one part of
+    /// a section that carries no text, and claims a band so that the rule has
+    /// nothing to run through.
+    pub(crate) fn rule(&mut self) {
+        // SAFETY: a live DC, and `hairline` documents its own contract.
+        unsafe {
+            let rule = self.y + self.row_h - S1;
+            hairline(self.dc, self.x0, self.x1, rule, self.pal.border);
+        }
+        self.y += self.row_h;
+    }
+
     /// A group heading drawn *on* the band of the row it names, with a faint
     /// rule filling the space beside it.
     ///

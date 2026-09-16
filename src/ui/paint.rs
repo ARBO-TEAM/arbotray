@@ -13,7 +13,7 @@ use crate::ui::pages::{
     DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, page_rows, page_section,
     page_shows_graph, usage_rows,
 };
-use crate::ui::settings::{SET_ROW_LABELS, foot_button_top};
+use crate::ui::settings::{ROW_DIVIDER, SET_ROW_LABELS, foot_button_top};
 use crate::ui::theme::scale;
 use crate::ui::{
     CLOCK_EXTRA, PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState,
@@ -329,11 +329,21 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // controls `layout_settings` places, from the same constants, so a row
         // and its caption cannot drift even though two functions draw them.
         if page == SETTINGS {
-            for label in SET_ROW_LABELS {
-                if label.is_empty() {
-                    // The tile grid's rows. A checkbox carries its own label, so
-                    // the band is skipped rather than closed up: the controls are
-                    // placed by row index, and the captions have to keep step.
+            for (row, label) in SET_ROW_LABELS.iter().enumerate() {
+                if row == ROW_DIVIDER {
+                    // The only mark on this page that is neither a control nor
+                    // a caption. It claims a band of its own rather than being
+                    // drawn across the grid's last row, because every row here
+                    // is placed by index: a rule that moved nothing would be a
+                    // rule drawn through the Refresh caption under it.
+                    c.rule();
+                } else if label.is_empty() {
+                    // The tile grid's row 0. A checkbox carries its own label,
+                    // so the band is skipped rather than closed up: the controls
+                    // are placed by row index, and the captions have to keep
+                    // step. Only the first row comes through here — the grid's
+                    // other three sit on the form's own rows, whose captions are
+                    // drawn behind their controls.
                     c.space(row_h);
                 } else {
                     c.row(label, "");
