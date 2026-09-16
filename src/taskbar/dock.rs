@@ -284,6 +284,11 @@ pub fn worst_case(cfg: &Config) -> TrayModel {
         gateway_text: String::new(),
         internet_text: String::new(),
         loss_text: String::new(),
+        // Same reason, and the adapter name is the longest string in the model —
+        // reserving it would be the most expensive mistake of the lot.
+        adapter_text: String::new(),
+        ip_text: String::new(),
+        dns_text: String::new(),
         wifi_text: field(cfg.show.wifi, "6G 100%"),
         wifi_name: None,
         usage_text: field(cfg.show.usage, "9999.9G"),
@@ -326,6 +331,20 @@ mod tests {
         assert!(m.cpu_text.is_empty());
         assert_eq!(m.ram_text, "100%");
         assert!(m.history.is_empty(), "no sparkline, no reserved width");
+    }
+
+    #[test]
+    fn worst_case_reserves_nothing_for_page_detail() {
+        // Every one of these is Network page text that never draws in the
+        // strip. A non-empty string here reserves width for text no user can
+        // ever see, and the adapter name is the longest in the model.
+        let m = worst_case(&Config::default());
+        assert!(m.gateway_text.is_empty());
+        assert!(m.internet_text.is_empty());
+        assert!(m.loss_text.is_empty());
+        assert!(m.adapter_text.is_empty());
+        assert!(m.ip_text.is_empty());
+        assert!(m.dns_text.is_empty());
     }
 
     #[test]

@@ -407,6 +407,27 @@ mod tests {
     }
 
     #[test]
+    fn page_detail_never_reaches_the_strip() {
+        // These six exist for the Network page and have no tile of their own:
+        // the fields are filled and the run must still be empty, which is what
+        // makes the taskbar exactly as wide as the user asked for. Adding one of
+        // them to `visible_segments` breaks this, deliberately.
+        let model = TrayModel {
+            gateway_text: "192.168.1.1".into(),
+            internet_text: "14ms".into(),
+            loss_text: "0%".into(),
+            adapter_text: "Wi-Fi".into(),
+            ip_text: "192.168.1.10".into(),
+            dns_text: "192.168.1.1, 8.8.8.8".into(),
+            ..Default::default()
+        };
+        assert!(visible_segments(&model).is_empty());
+        // And the tooltip is built from the same run, so it cannot leak there
+        // either — the SSID is the only thing the tooltip adds.
+        assert_eq!(model.tooltip(), "ArboTray");
+    }
+
+    #[test]
     fn empty_history_has_no_points() {
         assert!(sparkline_points(&[], 40, 12).is_empty());
     }

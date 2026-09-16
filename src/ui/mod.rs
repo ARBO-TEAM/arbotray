@@ -27,7 +27,8 @@ use crate::taskbar::render::{parse_color, sparkline_points};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush,
-    DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DeleteObject,
+    DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DeleteObject,
     DrawTextW, EndPaint, FW_NORMAL, FillRect, GetDC, GetStockObject, HBRUSH, HGDIOBJ, HFONT,
     InvalidateRect, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, Polyline, ReleaseDC,
     SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
@@ -789,6 +790,13 @@ fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
             if let Some(name) = &model.wifi_name {
                 push("Network", name);
             }
+            // The interface first, then what is on it: "which adapter is this"
+            // is the question every address below is an answer to, and the
+            // local IP sits directly above the gateway so the two ends of the
+            // connection read as a pair.
+            push("Adapter", &model.adapter_text);
+            push("IP", &model.ip_text);
+            push("DNS", &model.dns_text);
             push("Wi-Fi", &model.wifi_text);
             push("Download", &model.down_text);
             push("Upload", &model.up_text);
@@ -1404,7 +1412,10 @@ fn paint(hwnd: HWND, state: &UiState) {
 
         for (label, value) in &page_rows(page, &state.model) {
             draw(dc, state.font, label, x0, y, x1, DT_LEFT);
-            draw(dc, state.bold, value, x0, y, x1, DT_RIGHT);
+            // Ellipsised rather than clipped: an adapter description and a list
+            // of resolvers can both outrun the value column, and half a word
+            // looks like a rendering fault while `Realtek PCIe GbE F…` does not.
+            draw(dc, state.bold, value, x0, y, x1, DT_RIGHT | DT_END_ELLIPSIS);
             y += row_h;
         }
 
@@ -1582,6 +1593,9 @@ mod tests {
             loss_text: "0%".into(),
             wifi_text: "5G 78%".into(),
             wifi_name: Some("HomeNet".into()),
+            adapter_text: "Wi-Fi".into(),
+            ip_text: "192.168.1.10".into(),
+            dns_text: "192.168.1.1, 8.8.8.8".into(),
             usage_text: "1.4G".into(),
             quota_alert: false,
             history: vec![1, 2, 3],
@@ -1832,6 +1846,9 @@ mod tests {
             net,
             vec![
                 "Network",
+                "Adapter",
+                "IP",
+                "DNS",
                 "Wi-Fi",
                 "Download",
                 "Upload",
@@ -1844,9 +1861,40 @@ mod tests {
         // None of that detail may leak onto the page people open for the
         // numbers — that was the point of giving it a page at all.
         let overview = labels(OVERVIEW, &full());
-        for leaked in ["Network", "Wi-Fi", "Gateway", "Internet", "Loss"] {
+        for leaked in [
+            "Network", "Adapter", "IP", "DNS", "Wi-Fi", "Gateway", "Internet", "Loss",
+        ] {
             assert!(!overview.contains(&leaked), "{leaked} leaked onto Overview");
         }
+    }
+
+    #[test]
+    fn the_local_ip_reads_before_the_gateway_it_belongs_to() {
+        // This machine before the router it talks to: the two are the same
+        // reading from either end, and a page that shows one without the other
+        // leaves the reader to work out which end they are looking at.
+        let rows = page_rows(NETWORK, &full());
+        let at = |label| rows.iter().position(|(l, _)| *l == label).unwrap();
+        assert!(at("Adapter") < at("IP"), "the address needs its subject first");
+        assert!(at("IP") < at("Gateway"));
+        assert_eq!(rows[at("IP")].1, "192.168.1.10");
+        assert_eq!(rows[at("Gateway")].1, "192.168.1.1");
+        // Different machines, so the two rows must never carry the same text.
+        assert_ne!(rows[at("IP")].1, rows[at("Gateway")].1);
+    }
+
+    #[test]
+    fn an_adapter_with_no_address_still_names_itself() {
+        // A stack mid-DHCP, or IPv6-only: the adapter is worth a row even when
+        // there is no IPv4 to put under it, so the row is dropped on its own
+        // rather than taking the name down with it.
+        let model = TrayModel {
+            adapter_text: "Ethernet".into(),
+            ..Default::default()
+        };
+        let rows = page_rows(NETWORK, &model);
+        assert_eq!(rows, vec![("Adapter", "Ethernet".to_string())]);
+        assert!(page_rows(NETWORK, &TrayModel::default()).is_empty());
     }
 
     #[test]

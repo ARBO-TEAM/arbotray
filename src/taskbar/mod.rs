@@ -37,6 +37,18 @@ pub struct TrayModel {
     pub wifi_text: String,
     /// SSID of the connected network, for the tooltip only.
     pub wifi_name: Option<String>,
+    /// What to call the interface the traffic leaves by, e.g. `Wi-Fi`. Page
+    /// detail: the address below needs a subject, or "192.168.1.10" is a
+    /// number with nothing attached to it.
+    pub adapter_text: String,
+    /// The address *this* machine holds on that interface. Not to be confused
+    /// with `gateway_text`, which is the router's: a page that shows only one of
+    /// them leaves the reader guessing which end of the cable it is.
+    pub ip_text: String,
+    /// Every resolver Windows was handed, in the order it tries them. All of
+    /// them rather than the first: a dead primary behind a working secondary is
+    /// a real configuration, and this page is where that is visible.
+    pub dns_text: String,
     /// Today's total traffic, e.g. `1.4G`. Filled by the sampler loop rather
     /// than `from_metric`: the usage counter is stateful, and `from_metric`
     /// stays pure so it remains testable.
@@ -83,6 +95,24 @@ impl TrayModel {
                 None => "--".into(),
             };
             out.loss_text = l.loss_pct.map(|pct| format!("{pct}%")).unwrap_or_default();
+        }
+        // Also page detail, also absent from `visible_segments`: whose interface
+        // this is, and what address it holds. Each field is formatted only when
+        // the collector answered it, so a machine that reports an adapter but no
+        // IPv4 shows the adapter and leaves the address row empty.
+        if let Some(a) = &m.adapter {
+            out.adapter_text = a
+                .name
+                .clone()
+                .or_else(|| a.description.clone())
+                .unwrap_or_default();
+            out.ip_text = a.local_addr.map(format_addr).unwrap_or_default();
+            out.dns_text = a
+                .dns
+                .iter()
+                .map(|&addr| format_addr(addr))
+                .collect::<Vec<_>>()
+                .join(", ");
         }
         if cfg.show.wifi {
             // No adapter (or not on Wi-Fi) stays blank rather than showing a
@@ -162,7 +192,7 @@ pub fn format_rate(bps: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::{HardwareSample, LatencySample, NetSample};
+    use crate::telemetry::{AdapterSample, HardwareSample, LatencySample, NetSample};
 
     /// The exact `S_addr` this machine's router returns for the value
     /// `ipconfig` prints as `192.168.1.1`. If someone "simplifies"
@@ -195,6 +225,66 @@ mod tests {
         assert_eq!(model.loss_text, "");
     }
 
+    /// The same byte-order rule the gateway test pins, one layer out: these
+    /// addresses come from a `SOCKADDR` rather than a `u32` field, and a wrong
+    /// direction there is just as invisible on the happy path.
+    #[test]
+    fn adapter_addresses_are_formatted_in_network_byte_order() {
+        let cfg = Config::default();
+        let m = Metric {
+            adapter: Some(AdapterSample {
+                name: Some("Wi-Fi".into()),
+                description: Some("Intel(R) Wi-Fi 6 AX201 160MHz".into()),
+                // What the stack reports for `ipconfig`'s 192.168.1.10.
+                local_addr: Some(0x0a01_a8c0),
+                dns: vec![0x0101_a8c0, 0x0808_0808],
+            }),
+            ..Default::default()
+        };
+        let model = TrayModel::from_metric(&m, &cfg);
+        assert_eq!(model.adapter_text, "Wi-Fi");
+        assert_eq!(model.ip_text, "192.168.1.10");
+        // All of them, in the order Windows tries them — a dead primary behind
+        // a working secondary is exactly what this row is for.
+        assert_eq!(model.dns_text, "192.168.1.1, 8.8.8.8");
+    }
+
+    #[test]
+    fn an_adapter_without_a_friendly_name_uses_its_description() {
+        // The friendly name is the one Windows' own UI shows and is what a user
+        // will recognise, but it is not guaranteed to be there.
+        let m = Metric {
+            adapter: Some(AdapterSample {
+                name: None,
+                description: Some("Realtek PCIe GbE Family Controller".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let model = TrayModel::from_metric(&m, &Config::default());
+        assert_eq!(model.adapter_text, "Realtek PCIe GbE Family Controller");
+    }
+
+    #[test]
+    fn no_adapter_and_no_addresses_leave_the_detail_blank() {
+        // No adapter at all, then an adapter that answered with nothing: both
+        // have to produce empty strings, because the page drops empty rows and
+        // a bare ", " of joined nothing is not an empty string.
+        let bare = TrayModel::from_metric(&Metric::default(), &Config::default());
+        assert_eq!(bare.adapter_text, "");
+        assert_eq!(bare.ip_text, "");
+        assert_eq!(bare.dns_text, "");
+
+        let empty = Metric {
+            adapter: Some(AdapterSample::default()),
+            ..Default::default()
+        };
+        let model = TrayModel::from_metric(&empty, &Config::default());
+        assert_eq!(model.adapter_text, "");
+        assert_eq!(model.ip_text, "");
+        assert_eq!(model.dns_text, "");
+    }
+
     #[test]
     fn rates_pick_a_sane_unit() {
         assert_eq!(format_rate(0), "0B/s");
@@ -224,6 +314,7 @@ mod tests {
                 ..Default::default()
             }),
             wifi: None,
+            adapter: None,
         };
         let model = TrayModel::from_metric(&m, &cfg);
         assert_eq!(model.down_text, "");

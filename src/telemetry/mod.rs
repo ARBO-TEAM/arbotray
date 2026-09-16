@@ -4,12 +4,14 @@
 //!
 //! Contract: `poll()` must never panic and must never block longer than ~100ms.
 
+pub mod adapter;
 pub mod hardware;
 pub mod latency;
 pub mod network;
 pub mod usage;
 pub mod wifi;
 
+pub use adapter::Adapter;
 pub use hardware::Hardware;
 pub use latency::Latency;
 pub use network::Network;
@@ -74,6 +76,25 @@ pub struct LatencySample {
     pub loss_pct: Option<u32>,
 }
 
+/// The interface the traffic is flowing through, as Windows describes it.
+///
+/// A separate sample from `NetSample` rather than more fields on it: throughput
+/// is a rate that changes every tick, this is configuration that changes when
+/// the network does, and `network` sums *every* interface where this names one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdapterSample {
+    /// The friendly name Windows shows in its own UI, e.g. `Wi-Fi`.
+    pub name: Option<String>,
+    /// The driver's description of the card, e.g. the vendor's long model name.
+    pub description: Option<String>,
+    /// IPv4 address, in network byte order like every other Win32 address —
+    /// its bytes are the address. Format it through
+    /// `crate::taskbar::format_addr`, never `Ipv4Addr::from(u32)`.
+    pub local_addr: Option<u32>,
+    /// Resolvers in the order Windows tries them.
+    pub dns: Vec<u32>,
+}
+
 /// One full snapshot of everything the tray can display.
 #[derive(Debug, Clone, Default)]
 pub struct Metric {
@@ -81,6 +102,7 @@ pub struct Metric {
     pub hw: Option<HardwareSample>,
     pub wifi: Option<WifiSample>,
     pub latency: Option<LatencySample>,
+    pub adapter: Option<AdapterSample>,
 }
 
 /// Owns every collector and polls them together, in the order the tray needs.
@@ -90,6 +112,7 @@ pub struct Sampler {
     pub hw: Hardware,
     pub wifi: Wifi,
     pub latency: Latency,
+    pub adapter: Adapter,
 }
 
 impl Sampler {
@@ -99,6 +122,7 @@ impl Sampler {
             hw: Hardware::new(),
             wifi: Wifi::new(),
             latency: Latency::new(),
+            adapter: Adapter::new(),
         }
     }
 
@@ -108,6 +132,7 @@ impl Sampler {
             hw: self.hw.poll(),
             wifi: self.wifi.poll(),
             latency: self.latency.poll(),
+            adapter: self.adapter.poll(),
         }
     }
 }
