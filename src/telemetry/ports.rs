@@ -58,10 +58,15 @@ const STATE_ESTABLISHED: i32 = 5;
 /// it costs one `OpenProcess` per pid on the next tick.
 const NAME_CACHE_MAX: usize = 512;
 
-/// The most listening ports the page lists. A machine with a container runtime
-/// or a dev server stack can hold a hundred open ports, and a hundred rows is
-/// not a page — it is a scroll that does not scroll.
-pub const MAX_OPEN_ROWS: usize = 12;
+/// The most listening ports the page lists.
+///
+/// A ceiling rather than a page: the list is scrollable, so this exists only to
+/// bound the vector a hostile or broken table could hand over — not to decide
+/// what the user is allowed to see. A dev machine running a container stack
+/// holds dozens of listeners, and the one the user is actually looking for —
+/// the dev server they just started — is as likely to be at the bottom as the
+/// top, so a page-sized cap was hiding exactly the row this page is opened for.
+pub const MAX_OPEN_ROWS: usize = 400;
 
 /// Reads the two port tables. Holds the pid→name cache between polls.
 #[derive(Default)]

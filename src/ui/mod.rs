@@ -155,14 +155,28 @@ pub(crate) struct UiState {
     /// The confirmation popup, if one is up. Held here rather than as a child
     /// window so the frame can dim behind it in the same paint pass.
     modal: Modal,
-    /// The bands the Ports page's open-port rows were last drawn on, in the
-    /// model's own order. Recorded by the painter and read by the hit test.
+    /// The bands the Ports page's open-port rows were last drawn on, each with
+    /// the pid it was drawn from. Recorded by the painter and read by the hit
+    /// test.
     ///
     /// A layout cache rather than arithmetic repeated in two places: the rows
     /// are laid out by walking a `Canvas`, whose cursor depends on how many
     /// metric rows above them were filled, so a second copy of that sum would
     /// be a second answer to "which row did I just click".
-    port_rows: Vec<RECT>,
+    ///
+    /// The pid is carried *beside* the rectangle rather than looked up by index
+    /// afterwards, because the list scrolls: a band's position in this vector
+    /// is no longer the port's position in the model, and a click resolved
+    /// through that offset would aim the Stop button at whatever slid into the
+    /// band rather than at what is drawn in it.
+    port_rows: Vec<(RECT, u32)>,
+    /// How far down the open-port list the Ports page is scrolled, in rows.
+    ///
+    /// A dev machine holds more listeners than fit a page, and the one the
+    /// reader came for — the server they just started — is as likely to be
+    /// below the fold as above it. Clamped in the painter, against the room
+    /// that page actually has, so this cannot outlive a shorter list.
+    port_scroll: usize,
     /// What the last force-stop did, painted at the foot of the Ports page.
     /// Separate from `notice`, which belongs to the Settings page: a save's
     /// confirmation has no business appearing over a list of sockets.
@@ -216,6 +230,7 @@ pub fn ensure(
         selected_port: None,
         modal: Modal::default(),
         port_rows: Vec::new(),
+        port_scroll: 0,
         port_notice: None,
         watch: Stopwatch::default(),
     });
@@ -670,12 +685,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // the page clears the selection, so there is a way to take
                     // the aim back without leaving the page.
                     if s.page == PORTS {
+                        // The pid comes out of the band itself: the list is
+                        // scrolled, so a band's index here is where it sits on
+                        // screen, not where the port sits in the model.
                         let hit = s
                             .port_rows
                             .iter()
-                            .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
-                            .and_then(|i| s.model.open_ports.get(i))
-                            .map(|p| p.pid);
+                            .find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                            .map(|(_, pid)| *pid);
                         if hit != s.selected_port {
                             s.selected_port = hit;
                             // The notice described the *previous* selection, so
@@ -683,6 +700,38 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             s.port_notice = None;
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
+                    }
+                }
+                LRESULT(0)
+            }
+
+            // The wheel, over the Ports page's list. The one list in this window
+            // that can be taller than its page: a dev machine holds more
+            // listeners than fit between the counters and the Stop button, and
+            // the port the reader came for is as likely to be below the fold as
+            // above it.
+            //
+            // Handled on the *window* rather than on a child, because the list
+            // is painted rather than a control — there is no scrollable window
+            // to receive this, so the frame has to be the one that does. Nothing
+            // else in the window scrolls, so the wheel over any other page does
+            // nothing at all rather than being forwarded.
+            WM_MOUSEWHEEL => {
+                if !state.is_null() {
+                    let s = &mut *state;
+                    // A modal owns the window's input while it is up, and the
+                    // wheel is input like any other: a page scrolling under a
+                    // question about one of its rows is the same failure as a
+                    // click reaching behind it.
+                    if s.modal.is_open() || s.page != PORTS {
+                        return LRESULT(0);
+                    }
+                    // Signed, and out of the high word: a notch toward the user
+                    // is negative, so a positive delta scrolls the list back.
+                    let delta = (((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32) / WHEEL_DELTA;
+                    if delta != 0 {
+                        s.port_scroll = scroll_by(s.port_scroll, delta);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
                 LRESULT(0)
@@ -851,6 +900,22 @@ fn set_watch_timer(hwnd: HWND, running: bool) {
 /// click on the sidebar is a mouse message now.
 pub(crate) fn low_word(value: usize) -> u16 {
     (value & 0xFFFF) as u16
+}
+
+/// A scroll offset moved by `notches`, and never below zero.
+///
+/// Unsigned because an offset is a count of rows from the top, and the negative
+/// direction is what a `usize` would turn into four billion. The upper bound is
+/// not here: only the painter knows how much room the list got, so it clamps
+/// against that rather than against a guess made here. Scrolling past the end is
+/// therefore possible by exactly this much and is corrected on the next paint —
+/// which is also the case where the window was resized between the two.
+pub(crate) fn scroll_by(offset: usize, notches: i32) -> usize {
+    if notches >= 0 {
+        offset.saturating_add(notches as usize)
+    } else {
+        offset.saturating_sub(notches.unsigned_abs() as usize)
+    }
 }
 
 /// Make the title bar and the frame match the theme.
@@ -1109,6 +1174,54 @@ mod tests {
         // without opening the dashboard.
         let back = crate::config::Show::default();
         assert_eq!(tile_flags(&back), [true, true, true, true, true, false, true, true]);
+    }
+
+    #[test]
+    fn the_scroll_offset_never_goes_negative() {
+        // The whole reason the offset is a `usize` moved by a signed amount
+        // rather than an `i32`: scrolling up at the top of the list must stop,
+        // not wrap to four billion and draw a blank page.
+        assert_eq!(scroll_by(0, -1), 0);
+        assert_eq!(scroll_by(0, -100), 0);
+        assert_eq!(scroll_by(5, -3), 2);
+        assert_eq!(scroll_by(5, -50), 0);
+        assert_eq!(scroll_by(5, 3), 8);
+        // A wheel flick reports several notches in one message.
+        assert_eq!(scroll_by(0, 4), 4);
+        // The upper bound is the painter's, since only it knows the room.
+        assert_eq!(scroll_by(usize::MAX, 1), usize::MAX);
+    }
+
+    #[test]
+    fn a_port_row_band_carries_the_pid_it_was_drawn_from() {
+        // A hit test that resolved a band by its *index* would be right only
+        // while the list was scrolled to the top. This is the property that
+        // replaced it: the band knows its own port, so the index is irrelevant.
+        let rows: Vec<(RECT, u32)> = (0..3)
+            .map(|i| {
+                (
+                    RECT {
+                        left: 0,
+                        top: 30 * i,
+                        right: 200,
+                        bottom: 30 * (i + 1),
+                    },
+                    100 + i as u32,
+                )
+            })
+            .collect();
+        let hit = |x: i32, y: i32| {
+            rows.iter()
+                .find(|(r, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                .map(|(_, pid)| *pid)
+        };
+        assert_eq!(hit(10, 0), Some(100));
+        assert_eq!(hit(10, 75), Some(102));
+        // Below the last row, and above the first: nothing, so a click on the
+        // caption or the notice clears the selection rather than grabbing a
+        // neighbouring port through a rounding error.
+        assert_eq!(hit(10, 90), None);
+        assert_eq!(hit(10, -1), None);
     }
 
     #[test]

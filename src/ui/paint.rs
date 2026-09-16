@@ -167,28 +167,54 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         state.port_rows.clear();
         if page == PORTS {
             // The Stop button is pinned to the foot, so the list has to stop
-            // above it — twelve ports plus four counters is taller than a short
-            // window, and a row drawn under the button is a row that cannot be
-            // clicked.
+            // above it — a row drawn under the button is a row that cannot be
+            // clicked. The list scrolls rather than truncating, so this is a
+            // window onto it and not a cap on it.
             let limit = foot_button_top(h, state.dpi) - scale(S3, state.dpi);
             if state.model.open_ports.is_empty() {
                 c.empty("No listening ports were found.");
             } else if c.y() + row_h * 2 <= limit {
-                c.section("Open ports");
+                // Counted before the caption is drawn, because the offset has
+                // to be clamped against the room the list will actually have:
+                // a port closing between two samples shrinks the list, and an
+                // offset past its end would draw an empty page with a caption
+                // over it and no way back up.
+                let list_top = c.y() + row_h;
+                let visible = ((limit - list_top) / row_h).max(1) as usize;
+                let total = state.model.open_ports.len();
+                state.port_scroll = state.port_scroll.min(total.saturating_sub(visible));
+                let scroll = state.port_scroll;
+
+                // The caption carries the position, so the page says which slice
+                // of the list it is showing without claiming a band of its own
+                // for the count — the list is the tall part of this page and it
+                // should keep the room.
+                if total > visible {
+                    c.section(&format!(
+                        "Open ports   {}-{} of {total}  (scroll)",
+                        scroll + 1,
+                        scroll + visible
+                    ));
+                } else {
+                    c.section("Open ports");
+                }
                 // Borrowed from the model and pushed to the state's own list in
                 // the same loop: disjoint fields of one struct, so the borrow
-                // checker has no argument with it.
-                for entry in &state.model.open_ports {
-                    if c.y() + row_h > limit {
-                        break;
-                    }
+                // checker has no argument with it. The pid goes in beside the
+                // rectangle because the rectangle is a *screen* position and
+                // the pid is the port — a click resolved by position alone would
+                // aim at whatever the scroll had put there.
+                for entry in state.model.open_ports.iter().skip(scroll).take(visible) {
                     let top = c.y();
-                    state.port_rows.push(RECT {
-                        left: x0,
-                        top,
-                        right: x1,
-                        bottom: top + row_h,
-                    });
+                    state.port_rows.push((
+                        RECT {
+                            left: x0,
+                            top,
+                            right: x1,
+                            bottom: top + row_h,
+                        },
+                        entry.pid,
+                    ));
                     if state.selected_port == Some(entry.pid) {
                         // Behind the text, not around it: a ring drawn after the
                         // row would clip the descenders of its own label.

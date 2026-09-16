@@ -127,6 +127,25 @@ pub(crate) const TILE_LABELS: [&str; 8] = [
 /// `WM_ENABLE` below.
 pub(crate) const WM_MOUSELEAVE: u32 = 0x02A3;
 
+/// The wheel, for the one list in the window that can be taller than its page.
+///
+/// Spelled out for the same reason as `WM_MOUSELEAVE` below: it is a documented,
+/// stable message number and `WindowsAndMessaging` declares this one, but the
+/// list it drives is the Ports page's and nothing else in the window scrolls, so
+/// it is named here beside the other messages this window handles by hand rather
+/// than imported at the top of a 1500-line file for a single arm.
+///
+/// The packing is the one thing worth stating twice: `wparam`'s **high** word is
+/// the signed delta in multiples of `WHEEL_DELTA`, and its low word is the key
+/// state. Reading the low word — which is what a `lparam`-style assumption
+/// produces — reads the state flags as a distance and scrolls by a fraction of a
+/// row on every notch.
+pub(crate) const WM_MOUSEWHEEL: u32 = 0x020A;
+
+/// A notch of wheel. The delta is reported in multiples of this, so a
+/// free-spinning wheel's smaller movements are fractions of a row.
+pub(crate) const WHEEL_DELTA: i32 = 120;
+
 /// The up and down arrows, for moving between pages without the mouse.
 ///
 /// A listbox navigated itself and this one does not, so the keys the list would
