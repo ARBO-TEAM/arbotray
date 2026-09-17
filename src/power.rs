@@ -183,10 +183,14 @@ pub fn next_at(target_minute: u32, now: &SYSTEMTIME) -> SYSTEMTIME {
 }
 
 /// The instant `minutes` from `now`, rolling the calendar the same way.
+///
+/// The seconds are **kept**, unlike `next_at`'s. A countdown armed at 14:30:37
+/// for forty-five minutes is due at 15:15:37, and a countdown is the one kind
+/// of timer whose whole promise is the length of the wait — rounding it down to
+/// the minute would make "45 minutes" a number that is only sometimes true.
 pub fn after_minutes(minutes: u32, now: &SYSTEMTIME) -> SYSTEMTIME {
     let total = minute_of_day(now) + i64::from(minutes);
     let mut when = now.clone();
-    when.wSecond = 0;
     when.wMilliseconds = 0;
     // Whole days first, then the leftover as a time of day: splitting it this
     // way is what keeps a long wait from needing the hour field to hold more
@@ -216,18 +220,105 @@ fn days_in_month(year: u16, month: u16) -> u32 {
     }
 }
 
-/// Whether `when` has been reached, in minutes, from `now`.
+/// Seconds from `now` until `when`, negative once `when` has passed.
 ///
-/// The unit is a minute on purpose: a timer set a day out does not need to know
-/// about seconds, and a per-tick comparison that fires on the minute cannot
-/// fire twice for one instant.
-pub fn due(when: &SYSTEMTIME, now: &SYSTEMTIME) -> bool {
-    ordinal_minutes(now) >= ordinal_minutes(when)
+/// The whole countdown rests on this, and it is arithmetic on *calendar fields*
+/// rather than on an instant. `ordinal_minutes` is a local wall-clock ordinal,
+/// so a difference of minutes is exact in the frame the user set the timer in,
+/// and the two `wSecond` fields carry the part of a minute still to run. No
+/// timezone conversion and no `FILETIME`: a timer set for "23:00" is set against
+/// the clock on the wall, and that is the only clock it ever has to agree with.
+///
+/// Exactness rests on `next_at` and `after_minutes` zeroing what they should:
+/// a clock timer carries a zero second, so its countdown reaches 00:00 exactly
+/// on its own minute.
+pub fn seconds_between(when: &SYSTEMTIME, now: &SYSTEMTIME) -> i64 {
+    (ordinal_minutes(when) - ordinal_minutes(now)) * 60 + i64::from(when.wSecond)
+        - i64::from(now.wSecond)
 }
 
-/// Minutes from `now` until `when`, never negative.
-pub fn minutes_until(when: &SYSTEMTIME, now: &SYSTEMTIME) -> i64 {
-    (ordinal_minutes(when) - ordinal_minutes(now)).max(0)
+/// Seconds from `now` until `when`, never negative — what the page counts down.
+pub fn seconds_until(when: &SYSTEMTIME, now: &SYSTEMTIME) -> i64 {
+    seconds_between(when, now).max(0)
+}
+
+/// How long before its target a timer raises its question.
+///
+/// A timer that shut the machine down the instant it came due would be a timer
+/// nobody could set safely: a typo in one digit of "23:00" would end the
+/// session before the mistake could be seen. This is the safety margin, and it
+/// is half the reason this feature has a confirmation at all.
+pub const WARN_SECS: i64 = 60;
+
+/// How late a target may be reached and still act.
+///
+/// The other half of the safety margin, and the less obvious one. A laptop
+/// suspended at 22:00 with a timer set for 23:00 wakes in the morning with the
+/// target eleven hours in the past — and a plain "has it been reached" test
+/// would put it straight back to sleep, which is the worst thing this feature
+/// could do. Past this window the moment is gone and the timer is dropped
+/// rather than honoured.
+pub const GRACE_SECS: i64 = 300;
+
+/// What a timer's target means right now.
+///
+/// One pure function rather than three predicates, because the four cases are
+/// exclusive and a caller that could ask them separately would eventually ask
+/// them in the wrong order — and the cost of getting *that* wrong is a machine
+/// that either sleeps without asking or never sleeps at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Too far out to do anything about yet.
+    Waiting,
+    /// Close enough that the question should be on screen.
+    Warning,
+    /// Reached, and soon enough after to act on.
+    Due,
+    /// Passed by more than `GRACE_SECS`: the moment is gone.
+    Stale,
+}
+
+/// Which of the four `when` is in, seen from `now`.
+pub fn phase(when: &SYSTEMTIME, now: &SYSTEMTIME) -> Phase {
+    let secs = seconds_between(when, now);
+    if secs > WARN_SECS {
+        Phase::Waiting
+    } else if secs > 0 {
+        Phase::Warning
+    } else if secs >= -GRACE_SECS {
+        // Includes exactly zero: the target arrives on the tick at or just
+        // after its second, and the popup counts down to that.
+        Phase::Due
+    } else {
+        Phase::Stale
+    }
+}
+
+/// Whether `when` has been reached and is still worth acting on.
+pub fn due(when: &SYSTEMTIME, now: &SYSTEMTIME) -> bool {
+    phase(when, now) == Phase::Due
+}
+
+/// A countdown as the page prints it: `MM:SS`, `H:MM:SS`, or `Nd HH:MM:SS`.
+///
+/// The day field appears only past a day because that is where a reader stops
+/// being able to do the arithmetic in their head, and a countdown of "172:30"
+/// is a number nobody converts.
+pub fn format_countdown(seconds: i64) -> String {
+    let s = seconds.max(0);
+    let (d, h, m, sec) = (
+        s / 86_400,
+        (s % 86_400) / 3_600,
+        (s % 3_600) / 60,
+        s % 60,
+    );
+    if d > 0 {
+        format!("{d}d {h:02}:{m:02}:{sec:02}")
+    } else if h > 0 {
+        format!("{h}:{m:02}:{sec:02}")
+    } else {
+        format!("{m:02}:{sec:02}")
+    }
 }
 
 /// The current local time. Local, not UTC: the user sets this against the clock
@@ -235,6 +326,95 @@ pub fn minutes_until(when: &SYSTEMTIME, now: &SYSTEMTIME) -> i64 {
 pub fn now() -> SYSTEMTIME {
     // SAFETY: `GetLocalTime` fills a struct we own and cannot fail.
     unsafe { GetLocalTime() }
+}
+
+// --- what the config stores --------------------------------------------------
+
+/// An instant as the config stores it: `"2026-09-17 23:00:00"`.
+///
+/// Spelled out rather than as a unix time because this is a file people read and
+/// edit, and because the two things it has to survive — a reboot, and a
+/// hand-edited config — are both easier to get right when the stored value says
+/// what it means.
+pub fn format_stamp(t: &SYSTEMTIME) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
+}
+
+/// The instant a stamp names, or `None` for anything else.
+///
+/// A date that does not exist is refused rather than rolled forward. February
+/// 30th silently becoming March 2nd is the one failure in this file that costs
+/// something real, and it costs it on the day the machine goes down.
+pub fn parse_stamp(text: &str) -> Option<SYSTEMTIME> {
+    let (date, time) = text.trim().split_once(' ')?;
+    let mut d = date.split('-');
+    let (y, mo, day) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let mut t = time.split(':');
+    let (h, mi, s) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next().unwrap_or("0").parse().ok()?,
+    );
+    let parsed = SYSTEMTIME {
+        wYear: y,
+        wMonth: mo,
+        wDay: day,
+        wHour: h,
+        wMinute: mi,
+        wSecond: s,
+        wMilliseconds: 0,
+        wDayOfWeek: 0,
+    };
+    let sane = (1..=12).contains(&mo)
+        && (1..=days_in_month(y, mo) as u16).contains(&day)
+        && h <= 23
+        && mi <= 59
+        && s <= 59;
+    sane.then_some(parsed)
+}
+
+/// The trigger a config's timer names, or the clock for anything else.
+///
+/// The fallback for a word nobody recognises has to be the harmless one, and
+/// both of them here are chosen that way: an unknown mode is the clock, which
+/// cannot fire until a time has been set, and an unknown action is sleep, which
+/// does not end the session.
+pub fn mode_of(timer: &crate::config::Timer) -> Mode {
+    Mode::parse(&timer.mode).unwrap_or(Mode::AtTime)
+}
+
+/// The action a config's timer names, or sleep for anything else. See above.
+pub fn action_of(timer: &crate::config::Timer) -> Action {
+    Action::parse(&timer.action).unwrap_or(Action::Sleep)
+}
+
+/// The instant a config's timer names, or `None` when it names none.
+///
+/// A countdown reads its *stored* instant rather than `now` plus its wait: one
+/// armed before the machine went to sleep has to fire when it wakes, on the
+/// instant it was armed for. Reworking it from `now` would hand out a fresh
+/// full wait every time the app restarted, and a timer that is never wrong is
+/// one nobody notices is broken.
+pub fn fire_at(timer: &crate::config::Timer, now: &SYSTEMTIME) -> Option<SYSTEMTIME> {
+    match mode_of(timer) {
+        Mode::AtTime => Some(next_at(parse_hhmm(&timer.at)?, now)),
+        Mode::Countdown => parse_stamp(&timer.armed),
+    }
+}
+
+/// The instant an arming performed now would target, and the one to store.
+pub fn arm_target(timer: &crate::config::Timer, now: &SYSTEMTIME) -> Option<SYSTEMTIME> {
+    match mode_of(timer) {
+        Mode::AtTime => Some(next_at(parse_hhmm(&timer.at)?, now)),
+        Mode::Countdown => Some(after_minutes(timer.after_min, now)),
+    }
 }
 
 /// `"23:00"` and `"07:30"` to minutes past midnight.
@@ -350,6 +530,10 @@ fn enable_shutdown_privilege() -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// A time with a ragged second and a millisecond on it, which is what a
+    /// real `GetLocalTime` hands over. Every countdown test that is about *the
+    /// minute* uses this, so the ragged second is present in the arithmetic
+    /// rather than conveniently zero.
     fn at(y: u16, mo: u16, d: u16, h: u16, mi: u16) -> SYSTEMTIME {
         SYSTEMTIME {
             wYear: y,
@@ -360,6 +544,15 @@ mod tests {
             wSecond: 30,
             wMilliseconds: 500,
             ..Default::default()
+        }
+    }
+
+    /// The same, on the whole minute — where a countdown's arithmetic is exact.
+    fn at_zero(y: u16, mo: u16, d: u16, h: u16, mi: u16) -> SYSTEMTIME {
+        SYSTEMTIME {
+            wSecond: 0,
+            wMilliseconds: 0,
+            ..at(y, mo, d, h, mi)
         }
     }
 
@@ -398,7 +591,59 @@ mod tests {
         let now = at(2026, 9, 17, 14, 30);
         let when = next_at(23 * 60, &now);
         assert_eq!((when.wDay, when.wHour, when.wMinute), (17, 23, 0));
-        assert_eq!(minutes_until(&when, &now), 510);
+        assert_eq!(when.wSecond, 0, "a clock target is exact to the minute");
+        // 510 minutes, less the 30 seconds already elapsed inside the minute
+        // `now` is sitting in. The countdown is not rounded: a page that said
+        // "8:30:00" at 14:30:30 would be half a minute ahead of the clock it is
+        // counting against, and that is a number the user can catch lying.
+        assert_eq!(seconds_until(&when, &now), 510 * 60 - 30);
+        // At a whole minute, 8:30:00 exactly.
+        let sharp = at_zero(2026, 9, 17, 14, 30);
+        assert_eq!(seconds_until(&next_at(23 * 60, &sharp), &sharp), 510 * 60);
+    }
+
+    #[test]
+    fn a_countdown_keeps_the_seconds_it_was_armed_at() {
+        // The one place this differs from `next_at`, and it differs on purpose:
+        // a countdown's whole promise is the *length* of the wait, so "45
+        // minutes" armed at :37 is due at :37. Rounding it down to the minute
+        // would make the number on the page up to 59 seconds out.
+        let when = after_minutes(45, &at(2026, 9, 17, 14, 30));
+        assert_eq!(when.wSecond, 30);
+        assert_eq!((when.wDay, when.wHour, when.wMinute), (17, 15, 15));
+        assert_eq!(seconds_until(&when, &at(2026, 9, 17, 14, 30)), 45 * 60);
+    }
+
+    #[test]
+    fn a_stamp_survives_the_round_trip_it_is_stored_through() {
+        let when = after_minutes(90, &at(2026, 9, 17, 22, 45));
+        let text = format_stamp(&when);
+        // Ninety minutes past 22:45 is a quarter past midnight *the next day*,
+        // which is the half of this the calendar helper has to get right.
+        assert_eq!(text, "2026-09-18 00:15:30");
+        let back = parse_stamp(&text).expect("our own output must parse");
+        assert_eq!(seconds_between(&back, &when), 0);
+        // The instant and not just the text: this is what a restart three hours
+        // later is compared against, and a stamp that read back as a different
+        // day would fire on the wrong one.
+        assert_eq!((back.wDay, back.wHour, back.wMinute), (18, 0, 15));
+    }
+
+    #[test]
+    fn a_stamp_naming_a_day_that_does_not_exist_is_refused() {
+        // The one parse in this file that costs something real when it is
+        // lenient: February 30th rolled forward to March 2nd is a machine that
+        // goes to sleep on a date nobody asked for.
+        assert!(parse_stamp("2026-02-30 23:00:00").is_none());
+        assert!(parse_stamp("2026-13-01 23:00:00").is_none());
+        assert!(parse_stamp("2026-09-17 24:00:00").is_none());
+        assert!(parse_stamp("2026-09-17 23:60:00").is_none());
+        assert!(parse_stamp("").is_none());
+        assert!(parse_stamp("tomorrow").is_none());
+        assert!(parse_stamp("2026-09-17").is_none());
+        // And the leap day is a real day in the year it belongs to.
+        assert!(parse_stamp("2028-02-29 00:00:00").is_some());
+        assert!(parse_stamp("2026-02-29 00:00:00").is_none());
     }
 
     #[test]
@@ -448,26 +693,131 @@ mod tests {
     }
 
     #[test]
-    fn the_seconds_are_dropped_from_whatever_is_armed() {
-        // Otherwise a timer set at 14:30:37 would come due at 14:30:37, and the
-        // page's countdown would show a minute it never reaches.
-        let when = after_minutes(10, &at(2026, 9, 17, 14, 30));
-        assert_eq!((when.wSecond, when.wMilliseconds), (0, 0));
+    fn a_clock_target_drops_its_seconds_and_a_millisecond_always_goes() {
+        // A clock target has to land on the minute: the page's countdown ends
+        // at 00:00 and the machine has to go at that instant, not 37 seconds
+        // later because that is when the timer happened to be armed.
         let clock = next_at(600, &at(2026, 9, 17, 14, 30));
         assert_eq!((clock.wSecond, clock.wMilliseconds), (0, 0));
+        // A countdown keeps its second but never a millisecond: nothing on the
+        // page reads finer than a second, so carrying one would only make two
+        // `seconds_between` calls of the same instants disagree.
+        let wait = after_minutes(10, &at(2026, 9, 17, 14, 30));
+        assert_eq!(wait.wMilliseconds, 0);
+        assert_eq!(wait.wSecond, 30);
     }
 
     #[test]
-    fn a_timer_is_due_on_its_minute_and_not_before() {
-        let when = at(2026, 9, 17, 23, 0);
-        assert!(!due(&when, &at(2026, 9, 17, 22, 59)));
-        // Seconds inside the due minute do not postpone it: this fires on the
-        // first tick at or past the minute, which is the whole of the promise.
-        assert!(due(&when, &at(2026, 9, 17, 23, 0)));
-        assert!(due(&when, &at(2026, 9, 17, 23, 1)));
-        // And a day later it is still due, which is what makes a missed fire
-        // (a sleeping machine, a stopped app) act on waking rather than never.
-        assert!(due(&when, &at(2026, 9, 18, 6, 0)));
-        assert_eq!(minutes_until(&when, &at(2026, 9, 18, 6, 0)), 0);
+    fn a_timer_warns_a_minute_out_is_due_on_its_minute_and_gives_up_after_five() {
+        let when = at_zero(2026, 9, 17, 23, 0);
+        let see = |h, m, s| SYSTEMTIME {
+            wSecond: s,
+            wMilliseconds: 0,
+            ..at_zero(2026, 9, 17, h, m)
+        };
+
+        // An hour out: nothing to say.
+        assert_eq!(phase(&when, &see(22, 0, 0)), Phase::Waiting);
+        // A minute and one second out is still waiting, and the second after
+        // that is not — the question has to be on screen for the whole minute
+        // it warns about, and that minute starts exactly 60 seconds out.
+        assert_eq!(phase(&when, &see(22, 58, 59)), Phase::Waiting);
+        assert_eq!(seconds_until(&when, &see(22, 59, 0)), 60);
+        assert_eq!(phase(&when, &see(22, 59, 0)), Phase::Warning);
+        // The target itself, and every second inside the grace window. `Due`
+        // at exactly zero is what lets the popup count down *to* the instant
+        // and fire on the tick that reaches it.
+        assert_eq!(phase(&when, &see(23, 0, 0)), Phase::Due);
+        assert!(due(&when, &see(23, 0, 0)));
+        assert_eq!(phase(&when, &see(23, 4, 59)), Phase::Due);
+        // And then the moment is gone.
+        assert_eq!(phase(&when, &see(23, 5, 1)), Phase::Stale);
+        assert!(!due(&when, &see(23, 5, 1)));
+        // The case this window exists for, and the reason a plain "is it past"
+        // test would be wrong: a laptop suspended before the target wakes with
+        // it hours behind, and putting it straight back to sleep is the worst
+        // thing this feature could do.
+        assert_eq!(phase(&when, &at(2026, 9, 18, 6, 0)), Phase::Stale);
+    }
+
+    #[test]
+    fn a_countdown_prints_the_fields_a_reader_actually_uses() {
+        // Under a minute, minutes and seconds; under a day, hours; past a day,
+        // a day field. "172:30" is the number nobody converts, which is why the
+        // day unit appears at all.
+        assert_eq!(format_countdown(0), "00:00");
+        assert_eq!(format_countdown(-5), "00:00", "a passed timer reads zero");
+        assert_eq!(format_countdown(59), "00:59");
+        assert_eq!(format_countdown(60), "01:00");
+        assert_eq!(format_countdown(3_599), "59:59");
+        assert_eq!(format_countdown(3_600), "1:00:00");
+        assert_eq!(format_countdown(86_399), "23:59:59");
+        assert_eq!(format_countdown(86_400), "1d 00:00:00");
+        assert_eq!(format_countdown(86_400 * 2 + 3_661), "2d 01:01:01");
+    }
+
+    #[test]
+    fn the_config_round_trips_into_the_triggers_the_engine_speaks() {
+        use crate::config::Timer;
+        let t = Timer {
+            enabled: true,
+            mode: "countdown".into(),
+            at: "07:30".into(),
+            after_min: 45,
+            action: "shutdown".into(),
+            armed: String::new(),
+        };
+        assert_eq!(mode_of(&t), Mode::Countdown);
+        assert_eq!(action_of(&t), Action::Shutdown);
+        assert_eq!(arm_target(&t, &at_zero(2026, 9, 17, 14, 0)).unwrap().wHour, 14);
+        assert_eq!(arm_target(&t, &at_zero(2026, 9, 17, 14, 0)).unwrap().wMinute, 45);
+
+        let clock = Timer { mode: "at".into(), ..t.clone() };
+        assert_eq!(mode_of(&clock), Mode::AtTime);
+        // Armed for a time already past today, so tomorrow.
+        let now = at_zero(2026, 9, 17, 23, 30);
+        let target = arm_target(&clock, &now).unwrap();
+        assert_eq!((target.wDay, target.wHour, target.wMinute), (18, 7, 30));
+
+        // A word this version does not know is refused into the harmless
+        // branch rather than guessed at: the clock, which cannot fire until a
+        // time has been set, and sleep, which does not end the session.
+        let unknown = Timer { mode: "later".into(), action: "hibernate".into(), ..t.clone() };
+        assert_eq!(mode_of(&unknown), Mode::AtTime);
+        assert_eq!(action_of(&unknown), Action::Sleep);
+        // And a clock time that is not a time has no target at all, so the
+        // timer cannot be armed into a state that fires the moment it is set.
+        let broken = Timer { at: "soon".into(), ..clock };
+        assert!(fire_at(&broken, &now).is_none());
+        assert!(arm_target(&broken, &now).is_none());
+    }
+
+    #[test]
+    fn a_countdown_reads_its_target_back_off_disk_rather_than_counting_again() {
+        // The one thing that makes a countdown survive a restart, a reboot or a
+        // sleep. Recomputing `now + 45 minutes` on load would hand out a fresh
+        // full wait every time the app came back, so a 45-minute timer would
+        // never fire on a machine that restarted more often than that.
+        use crate::config::Timer;
+        let armed_at = at_zero(2026, 9, 17, 14, 0);
+        let target = after_minutes(45, &armed_at);
+        let t = Timer {
+            mode: "countdown".into(),
+            after_min: 45,
+            armed: format_stamp(&target),
+            ..Timer::default()
+        };
+
+        assert_eq!(fire_at(&t, &armed_at).unwrap().wMinute, 45);
+        // Two hours later it still names 14:45 — which by then is due, not
+        // fifteen minutes away.
+        let later = at_zero(2026, 9, 17, 16, 0);
+        let when = fire_at(&t, &later).expect("the stamp is still readable");
+        assert_eq!((when.wHour, when.wMinute), (14, 45));
+        assert_eq!(seconds_between(&when, &later), -(2 * 60 - 45) * 60);
+        // And a countdown that was never armed names nothing, which is what
+        // keeps the first launch after recording a wait from firing on it.
+        let never = Timer { armed: String::new(), ..t };
+        assert!(fire_at(&never, &later).is_none());
     }
 }

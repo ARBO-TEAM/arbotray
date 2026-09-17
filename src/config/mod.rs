@@ -50,6 +50,14 @@ pub const DEFAULT_JSON: &str = r##"{
     "x": null,
     "y": null,
     "always_on_top": true
+  },
+  "timer": {
+    "enabled": false,
+    "mode": "at",
+    "at": "23:00",
+    "after_min": 60,
+    "action": "sleep",
+    "armed": ""
   }
 }"##;
 
@@ -69,6 +77,57 @@ pub struct Config {
     /// draws that is not inside a surface Windows already owns, so it is opted
     /// into rather than started with.
     pub widget: Widget,
+    /// The sleep / shut-down timer. Off by default, and *disarmed* by default
+    /// even once configured — see [`Timer`].
+    pub timer: Timer,
+}
+
+/// The sleep / shut-down timer's settings.
+///
+/// The three fields that describe *what* to fire are kept apart from the one
+/// that says whether it will, because they are decided at different times. What
+/// and when are the settings a user picks once and leaves; `armed` is the
+/// decision to let it happen tonight, made on the day — and it is deliberately
+/// not remembered across a restart. A timer that survived a reboot armed would
+/// shut a machine down at an hour nobody was standing in front of it to cancel.
+///
+/// Every field is a `String` or a plain number rather than one of the `power`
+/// enums, because this is a file people hand-edit: a word this version does not
+/// recognise has to land as "refused, and therefore off" rather than as a
+/// deserialisation failure that takes the whole config with it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Timer {
+    /// Whether the timer is switched on at all.
+    pub enabled: bool,
+    /// `"at"` or `"countdown"` — see `power::Mode`.
+    pub mode: String,
+    /// The clock time, `"HH:MM"`, for `"at"`. Local, like the clock on the wall.
+    pub at: String,
+    /// How many minutes from arming, for `"countdown"`.
+    pub after_min: u32,
+    /// `"sleep"` or `"shutdown"` — see `power::Action`.
+    pub action: String,
+    /// The instant a countdown was armed for, as `power::format_stamp` writes
+    /// it. Empty when nothing is armed, and read back for `"countdown"` mode
+    /// only: an `"at"` timer recomputes its next occurrence every time it looks.
+    pub armed: String,
+}
+
+impl Default for Timer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "at".into(),
+            // A time nobody has to act on to be safe: the default action is
+            // sleep and the timer starts off, so a config written by a version
+            // that did not have this section cannot put a machine to bed.
+            at: "23:00".into(),
+            after_min: 60,
+            action: "sleep".into(),
+            armed: String::new(),
+        }
+    }
 }
 
 /// The desktop widget's own settings.
@@ -255,6 +314,7 @@ impl Default for Config {
             retention: Retention::default(),
             quota_gb: 0.0,
             widget: Widget::default(),
+            timer: Timer::default(),
         }
     }
 }
