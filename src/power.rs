@@ -116,6 +116,14 @@ impl Mode {
             Mode::Countdown => "After a wait",
         }
     }
+
+    /// The other one. Two variants, so the toggle needs no table.
+    pub fn flipped(self) -> Self {
+        match self {
+            Mode::AtTime => Mode::Countdown,
+            Mode::Countdown => Mode::AtTime,
+        }
+    }
 }
 
 /// Midnight of the day `t` falls on, in whole minutes since the epoch.

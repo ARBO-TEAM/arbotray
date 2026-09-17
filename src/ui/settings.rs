@@ -6,10 +6,13 @@ use crate::config::{
 use crate::ui::consts::{
     BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, PICK_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG,
     SET_FONT, SET_INTERVAL, SET_OPACITY, SET_PICK_ALERT, SET_PICK_BG, SET_PICK_FG, SET_QUOTA,
-    SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_WATCH, SET_WATCH_RESET, SET_WIDGET,
-    TILE_IDS, TILE_LABELS, WM_ENABLE,
+    SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_THEME, SET_TIMER_ACTION,
+    SET_TIMER_ARM, SET_TIMER_AT, SET_TIMER_MODE, SET_TIMER_WAIT, SET_WATCH, SET_WATCH_RESET,
+    SET_WIDGET, TILE_IDS,
+    TILE_LABELS, WM_ENABLE,
 };
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
+use crate::power;
 use crate::ui::low_word;
 use crate::ui::stopwatch::Stopwatch;
 use crate::ui::theme::{scale, sidebar_w};
@@ -49,6 +52,17 @@ pub(crate) struct SettingsForm {
     /// tray's thread and this window cannot reach it — the save hands the
     /// config over instead, exactly as a theme edit does.
     pub(crate) widget: bool,
+}
+
+impl SettingsForm {
+    /// The background as the page currently shows it.
+    ///
+    /// Read back from the field rather than kept beside it: the appearance row
+    /// decides which preset to offer from this string, and a second copy could
+    /// disagree with the box the user is looking at the moment after a Pick.
+    pub(crate) fn background(&self) -> String {
+        self.background.clone()
+    }
 }
 
 impl SettingsForm {
@@ -217,6 +231,34 @@ pub(crate) fn write_form(hwnd: HWND, cfg: &Config) {
     set_check(hwnd, SET_WIDGET, form.widget);
     // The quota field is only meaningful while its switch is on.
     set_enabled(hwnd, SET_QUOTA, form.quota_on);
+    // Last, and from the Background field just written above rather than from
+    // the form: the button says which way the *page* goes, so the box beside it
+    // is the only thing that can answer.
+    write_theme_button(hwnd, &form.background);
+}
+
+/// The appearance button's word: the mode it switches to, not the one in force.
+pub(crate) fn write_theme_button(hwnd: HWND, background: &str) {
+    let (_, caption, _, _) = crate::ui::design::next_preset(background);
+    set_text(hwnd, SET_THEME, caption);
+}
+
+/// The appearance button: type the other preset's two colours into the two
+/// colour fields.
+///
+/// Staged like every field on this page — nothing is written to disk and the
+/// window keeps its colours until Save — which is what makes the button safe to
+/// try and safe to undo, and is why it lives here rather than on the tray menu.
+/// The form's own copy moves with the boxes so the glyph under the caption
+/// describes the colours the user is looking at.
+pub(crate) fn apply_preset(hwnd: HWND, state: &mut UiState) -> &'static str {
+    let (_, caption, bg, fg) = crate::ui::design::next_preset(&read_form(hwnd).background);
+    set_text(hwnd, SET_BG, bg);
+    set_text(hwnd, SET_FG, fg);
+    set_text(hwnd, SET_THEME, caption);
+    state.settings.background = bg.to_string();
+    state.settings.foreground = fg.to_string();
+    caption
 }
 
 /// The quota as it appears in the edit box: one decimal for a real plan, and
@@ -405,6 +447,10 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     for (id, _) in PICK_TARGETS {
         create_control(parent, state, w!("BUTTON"), "Pick", button_style, id);
     }
+    // One button for the two presets, on the row under the two colours it
+    // writes. Blank here and given its word by `write_theme_button`, because the
+    // caption is state — it names the mode it switches to, not the one in force.
+    create_control(parent, state, w!("BUTTON"), "", button_style, SET_THEME);
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
     // The Speed Test page's, and the one control here that does not belong to
@@ -423,7 +469,18 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     create_control(parent, state, w!("BUTTON"), "Start", button_style, SET_WATCH);
     create_control(parent, state, w!("BUTTON"), "Reset", button_style, SET_WATCH_RESET);
 
+    // The Timer page's five. The two "drop-downs" are push buttons whose caption
+    // *is* the selection — see `write_timer` — so they are created with the same
+    // `button_style` as everything else, and the arm button takes the foot slot
+    // the other page-owned pairs use.
+    create_control(parent, state, w!("BUTTON"), "At a time", button_style, SET_TIMER_MODE);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_TIMER_AT);
+    create_control(parent, state, w!("EDIT"), "", num_style, SET_TIMER_WAIT);
+    create_control(parent, state, w!("BUTTON"), "Sleep", button_style, SET_TIMER_ACTION);
+    create_control(parent, state, w!("BUTTON"), "Arm", button_style, SET_TIMER_ARM);
+
     write_form(parent, &state.cfg);
+    write_timer(parent, &state.cfg);
 }
 
 /// One child control, hidden until its page is showing.
@@ -490,7 +547,11 @@ pub(crate) const ROW_ALERT: usize = 10;
 pub(crate) const ROW_OPACITY: usize = 11;
 pub(crate) const ROW_STARTUP: usize = 12;
 pub(crate) const ROW_WIDGET: usize = 13;
-pub(crate) const ROW_SAVE: usize = 14;
+/// The dark/light button, above the two colours it writes rather than beside
+/// them: it is a way to *type into* the Background and Foreground fields, and a
+/// row under them is where a user looks after reading the two hex strings.
+pub(crate) const ROW_APPEARANCE: usize = 14;
+pub(crate) const ROW_SAVE: usize = 15;
 pub(crate) const SET_ROW_COUNT: usize = ROW_SAVE + 1;
 
 /// The Settings page's captions, one per row in paint order, with whatever a
@@ -517,12 +578,41 @@ pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
     "Opacity   0-255",
     "Start with Windows",
     "Desktop widget",
+    "Appearance",
     "Write config.json",
+];
+
+/// The Timer page's captions, on bands of their own from the same `form_top`
+/// the controls are placed from.
+///
+/// Separate from `SET_ROW_LABELS` rather than appended to it, because the two
+/// pages share only their arithmetic: the Settings page's rows include a tile
+/// grid and a divider that this one has none of, and a shared array would need
+/// offsets to say which half applied.
+pub(crate) const TIMER_ROW_MODE: usize = 0;
+pub(crate) const TIMER_ROW_AT: usize = 1;
+pub(crate) const TIMER_ROW_WAIT: usize = 2;
+pub(crate) const TIMER_ROW_ACTION: usize = 3;
+pub(crate) const TIMER_ROW_COUNT: usize = 4;
+pub(crate) const TIMER_LABELS: [&str; TIMER_ROW_COUNT] = [
+    "Trigger",
+    "Time   HH:MM",
+    "Wait   minutes",
+    "Action",
+];
+
+/// Where each of the Timer page's controls sits. The same table shape as
+/// `FIELD_ROWS`, for the same reason: the layout and the captions read one list.
+pub(crate) const TIMER_FIELD_ROWS: [(i32, usize); 4] = [
+    (SET_TIMER_MODE, TIMER_ROW_MODE),
+    (SET_TIMER_AT, TIMER_ROW_AT),
+    (SET_TIMER_WAIT, TIMER_ROW_WAIT),
+    (SET_TIMER_ACTION, TIMER_ROW_ACTION),
 ];
 
 /// Which row each non-tile control belongs on. One table drives both the layout
 /// and the captions, so a control cannot end up under the wrong line.
-pub(crate) const FIELD_ROWS: [(i32, usize); 15] = [
+pub(crate) const FIELD_ROWS: [(i32, usize); 16] = [
     (SET_INTERVAL, ROW_REFRESH),
     (SET_QUOTA_ON, ROW_PLAN),
     (SET_QUOTA, ROW_PLAN),
@@ -533,6 +623,7 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 15] = [
     (SET_OPACITY, ROW_OPACITY),
     (SET_AUTOSTART, ROW_STARTUP),
     (SET_WIDGET, ROW_WIDGET),
+    (SET_THEME, ROW_APPEARANCE),
     (SET_SAVE, ROW_SAVE),
     (SET_RESET, ROW_SAVE),
     (SET_PICK_BG, ROW_BG),
@@ -598,6 +689,203 @@ pub(crate) fn pick_target(button: i32) -> Option<i32> {
 /// window — eight tiles in two columns is four rows only if this agrees.
 pub(crate) fn tile_slot(index: usize) -> (usize, usize) {
     (index / TILE_COLS, index % TILE_COLS)
+}
+
+// --- the Timer page -------------------------------------------------------
+
+/// The Timer form as the user left it: words, and one number that may not be
+/// one yet.
+///
+/// Same shape and same reasoning as `SettingsForm`. The three words are stored
+/// as the config stores them — a `power::Mode` here would have to answer what a
+/// hand-edited `"at "` means before the user could see it, and the page has to
+/// be able to show what is on disk rather than what this version understands.
+pub(crate) struct TimerForm {
+    pub(crate) mode: String,
+    pub(crate) at: String,
+    pub(crate) wait: i32,
+    pub(crate) action: String,
+}
+
+impl TimerForm {
+    /// The form for a config: the two words repaired to something the engine
+    /// understands, so the page never offers a value it would then refuse.
+    ///
+    /// The repair is display-only. `into_config` writes back whatever the
+    /// buttons say once they are clicked, and an untouched page saves the
+    /// repaired word — which is the honest outcome: the page showed "At a time"
+    /// and the user pressed Save, so that is what they chose.
+    pub(crate) fn from_config(cfg: &Config) -> Self {
+        Self {
+            mode: power::mode_of(&cfg.timer).key().to_string(),
+            at: if power::parse_hhmm(&cfg.timer.at).is_some() {
+                cfg.timer.at.trim().to_string()
+            } else {
+                power::format_hhmm(
+                    power::parse_hhmm(&crate::config::Timer::default().at).unwrap_or(23 * 60),
+                )
+            },
+            wait: cfg.timer.after_min.clamp(1, TIMER_MAX_MIN as u32) as i32,
+            action: power::action_of(&cfg.timer).key().to_string(),
+        }
+    }
+
+    /// Apply the form to a copy of `base`.
+    ///
+    /// `enabled` is set here and the arm is deliberately left alone: what to fire
+    /// is a setting, whether tonight is the night is not. A save therefore
+    /// reconfigures a timer that is already armed without disarming it, and the
+    /// armed instant a countdown is holding on to survives the edit.
+    pub(crate) fn into_config(&self, base: &Config) -> Result<Config, String> {
+        let minute = match power::Mode::parse(&self.mode) {
+            Some(power::Mode::AtTime) => {
+                let Some(m) = power::parse_hhmm(&self.at) else {
+                    return Err(format!("refused: \"{}\" is not a time of day", self.at.trim()));
+                };
+                Some(m)
+            }
+            // Nothing to read: the wait is the countdown's target.
+            Some(power::Mode::Countdown) => None,
+            None => return Err("refused: pick a trigger".into()),
+        };
+        if power::Mode::parse(&self.mode) == Some(power::Mode::Countdown)
+            && !(1..=TIMER_MAX_MIN).contains(&self.wait)
+        {
+            return Err(format!("refused: a wait of {} minutes", self.wait));
+        }
+
+        let mut cfg = base.clone();
+        cfg.timer.enabled = true;
+        cfg.timer.mode = self.mode.clone();
+        if let Some(m) = minute {
+            cfg.timer.at = power::format_hhmm(m);
+        }
+        cfg.timer.after_min = self.wait.max(0) as u32;
+        cfg.timer.action = self.action.clone();
+        Ok(cfg)
+    }
+}
+
+/// The longest wait the page will accept, in minutes. A month: past that a
+/// countdown is a diary entry, and the field stops bounding anything.
+pub(crate) const TIMER_MAX_MIN: i32 = 60 * 24 * 31;
+
+/// Read the Timer page's four controls.
+
+pub(crate) fn read_timer(hwnd: HWND) -> TimerForm {
+    TimerForm {
+        mode: text_of(hwnd, SET_TIMER_MODE).unwrap_or_default(),
+        at: text_of(hwnd, SET_TIMER_AT).unwrap_or_default(),
+        wait: parse_int(text_of(hwnd, SET_TIMER_WAIT).as_deref()).unwrap_or(0),
+        action: text_of(hwnd, SET_TIMER_ACTION).unwrap_or_default(),
+    }
+}
+
+/// Push a config into the Timer page's controls.
+///
+/// The two drop-downs are push buttons whose *caption* is the selection, so
+/// writing this form is `set_text` on all four — the same call the text fields
+/// use. A real combo box would need a message to select an entry and another to
+/// read it back, and the two would then be a second place the page could
+/// disagree with itself.
+pub(crate) fn write_timer(hwnd: HWND, cfg: &Config) {
+    let form = TimerForm::from_config(cfg);
+    let mode = power::Mode::parse(&form.mode).unwrap_or(power::Mode::AtTime);
+    let action = power::Action::parse(&form.action).unwrap_or(power::Action::Sleep);
+    set_text(hwnd, SET_TIMER_MODE, mode.label());
+    set_text(hwnd, SET_TIMER_AT, &form.at);
+    set_text(hwnd, SET_TIMER_WAIT, &form.wait.to_string());
+    set_text(hwnd, SET_TIMER_ACTION, action.label());
+}
+
+/// Which of the two fields a mode actually uses, so the other can be greyed.
+///
+/// Both stay visible: the pair of them *is* the explanation of what the two
+/// modes are, and a field that vanished on a click would move the one under it.
+pub(crate) fn sync_timer_fields(hwnd: HWND, cfg: &Config) {
+    let at_time = power::mode_of(&cfg.timer) == power::Mode::AtTime;
+    set_enabled(hwnd, SET_TIMER_AT, at_time);
+    set_enabled(hwnd, SET_TIMER_WAIT, !at_time);
+}
+
+/// Make the arm button say what the timer is doing.
+///
+/// The clock is the truth and the caption is read back off it, the way the
+/// Stopwatch's button is — so a config edited in a text editor and a page
+/// showing the wrong word cannot both be true.
+pub(crate) fn sync_arm_button(hwnd: HWND, state: &UiState) {
+    let label = if state.cfg.timer.enabled {
+        "Disarm"
+    } else {
+        "Arm"
+    };
+    let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: our own child, and `wide` outlives the call.
+    unsafe {
+        if let Ok(ctl) = GetDlgItem(Some(hwnd), SET_TIMER_ARM) {
+            let _ = SetWindowTextW(ctl, PCWSTR(wide.as_ptr()));
+        }
+    }
+}
+
+/// Arm or disarm the timer, and return the line to show under the fields.
+///
+/// This is the one control on the page that is not staged behind Save, because
+/// it is not a setting: it is the decision to let tonight happen, and it is
+/// written to disk at once so that the tray sees it without waiting for a Save
+/// that may never come. Everything above it is read first — arming a timer from
+/// fields the disk does not agree with would fire something other than what the
+/// page is showing.
+///
+/// `enabled` is the arm. `armed` carries the instant and is spent only by a
+/// countdown, which has no other way to remember when it was set for; an `"at"`
+/// timer recomputes its next occurrence from the clock every time it looks, so a
+/// stamp there would be a second answer to a question already answered.
+pub(crate) fn toggle_arm(hwnd: HWND, state: &mut UiState) -> String {
+    if state.cfg.timer.enabled {
+        state.cfg.timer.enabled = false;
+        // The stamp goes with the arm. Left behind it would be a time the
+        // engine still names while the page says the timer is off, and the
+        // re-arm would then have to decide whether it was stale.
+        state.cfg.timer.armed.clear();
+        let written = state.cfg.save();
+        state.handed_back = true;
+        write_timer(hwnd, &state.cfg);
+        sync_timer_fields(hwnd, &state.cfg);
+        return match written {
+            Ok(()) => "saved: disarmed".into(),
+            Err(e) => format!("disarmed, but could not write the config: {e}"),
+        };
+    }
+
+    let form = read_timer(hwnd);
+    let mut cfg = match form.into_config(&state.cfg) {
+        Ok(cfg) => cfg,
+        Err(problem) => return problem,
+    };
+    let Some(when) = power::arm_target(&cfg.timer, &power::now()) else {
+        return "refused: that timer names no time".into();
+    };
+    cfg.timer.armed = match power::mode_of(&cfg.timer) {
+        power::Mode::Countdown => power::format_stamp(&when),
+        power::Mode::AtTime => String::new(),
+    };
+    cfg.timer.enabled = true;
+
+    let written = cfg.save();
+    state.cfg = cfg;
+    state.handed_back = true;
+    write_timer(hwnd, &state.cfg);
+    sync_timer_fields(hwnd, &state.cfg);
+    let action = power::action_of(&state.cfg.timer);
+    match written {
+        Ok(()) => format!(
+            "saved: {} at {}",
+            action.label().to_lowercase(),
+            power::format_stamp(&when)
+        ),
+        Err(e) => format!("armed, but could not write the config: {e}"),
+    }
 }
 
 /// Where a tile checkbox sits: the left and right edges of column `col` inside
@@ -676,17 +964,29 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
             place(hwnd, id, left, y, width, ctl_h);
         }
 
+        // The Timer page's four, on bands of their own from the same `top`, so
+        // the captions the painter draws land beside the controls they name. The
+        // two buttons share the field column with the two edits: a "drop-down"
+        // that was any narrower than the field under it would read as a second,
+        // smaller kind of thing rather than as the same setting.
+        for (id, row) in TIMER_FIELD_ROWS {
+            let y = top + row_h * row as i32 + nudge;
+            place(hwnd, id, field_x, y, field_w, ctl_h);
+        }
+
         // The two page-owned buttons, pinned to the foot of the content column
         // rather than placed on a band. Everything above them on their own page
         // belongs to the painter, and how much of it there is depends on the
         // machine — a control on a band would end up underneath a row the
         // moment the page grew one.
         let foot = foot_button_top(h, state.dpi);
-        // Two columns, one row. Every one of the four is placed on every
+        // Two columns, one row. Every one of the five is placed on every
         // layout, so no two may share a rectangle — they belong to different
         // pages and only two are ever shown, but "shown" is not something this
         // function gets to know. The pairs are in different columns, so the
-        // Speed Test and Ports buttons cannot meet the Stopwatch pair either.
+        // Speed Test and Ports buttons cannot meet the Stopwatch pair either,
+        // and the Timer's lone Arm button takes the left column the Stopwatch
+        // shares rather than a slot of its own.
         //
         // They used to be wrapped onto a second row, on the reasoning that four
         // 150-wide fields with a gap each is 630 against a 470-wide column at
@@ -700,6 +1000,7 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
             (SET_STOP, 1),
             (SET_WATCH, 0),
             (SET_WATCH_RESET, 1),
+            (SET_TIMER_ARM, 0),
         ] {
             let (cx, cy, cw, ch) = foot_slot(column, x0, field_w, gap, foot, ctl_h);
             place(hwnd, id, cx, cy, cw, ch);
@@ -780,10 +1081,10 @@ pub(crate) fn foot_slot(
 
 /// Every control the dashboard owns, in creation order.
 ///
-/// Named for the Settings page because that is where all but one of them live:
-/// this is the list `layout_settings` hands the themed font to, and the one
-/// `show_controls` walks. It carries `SET_SPEED` too, because a control whose
-/// font this list forgot would render in the system face — which is not a
+/// Named for the Settings page because that is where most of them live: this is
+/// the list `layout_settings` hands the themed font to, and the one
+/// `show_controls` walks. It carries the page-owned controls too, because one
+/// whose font this list forgot would render in the system face — which is not a
 /// failure anything else would catch.
 pub(crate) fn control_ids() -> Vec<i32> {
     let mut ids: Vec<i32> = TILE_IDS.to_vec();
@@ -792,6 +1093,8 @@ pub(crate) fn control_ids() -> Vec<i32> {
     ids.push(SET_STOP);
     ids.push(SET_WATCH);
     ids.push(SET_WATCH_RESET);
+    ids.extend(TIMER_FIELD_ROWS.iter().map(|(id, _)| *id));
+    ids.push(SET_TIMER_ARM);
     ids
 }
 
@@ -823,11 +1126,17 @@ pub(crate) fn show_controls(hwnd: HWND, page: usize) {
     // the split between "the Settings page's controls" and "the rest" is
     // written down, and a third page-owned control should be a row here rather
     // than another branch in two places.
-    let elsewhere: [(i32, bool); 4] = [
+    let timer = page == crate::ui::pages::TIMER;
+    let elsewhere: [(i32, bool); 9] = [
         (SET_SPEED, page == crate::ui::pages::SPEEDTEST),
         (SET_STOP, page == crate::ui::pages::PORTS),
         (SET_WATCH, page == crate::ui::pages::STOPWATCH),
         (SET_WATCH_RESET, page == crate::ui::pages::STOPWATCH),
+        (SET_TIMER_MODE, timer),
+        (SET_TIMER_AT, timer),
+        (SET_TIMER_WAIT, timer),
+        (SET_TIMER_ACTION, timer),
+        (SET_TIMER_ARM, timer),
     ];
     // SAFETY: every id names one of our own children; `ShowWindow` on a child
     // only changes its visibility.

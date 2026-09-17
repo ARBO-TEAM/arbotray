@@ -51,12 +51,13 @@ pub(crate) use theme::*;
 // with the frame painter's, and the window procedure names it explicitly.
 
 use crate::config::Config;
+use crate::power;
 use crate::taskbar::TrayModel;
 use crate::taskbar::icon::app_icon;
 // Named because the tests build one: production code only ever reads the list.
 #[cfg(test)]
 use crate::taskbar::OpenPort;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_ROUND, DwmSetWindowAttribute,
@@ -190,6 +191,18 @@ pub(crate) struct UiState {
     /// `TICK_MS`: the tray is asked to feed this window faster while it runs,
     /// and the timer is never touched when it is not.
     watch: Stopwatch,
+    /// Whether the power timer's confirmation has already been raised for the
+    /// instant it is armed for.
+    ///
+    /// One flag instead of a rule at every place a popup can come down — a
+    /// click, `Esc`, a page change — because the answer is the same at all of
+    /// them and none of them is about the power timer. Cancel, dismiss and walk
+    /// away all mean the same thing: no. Without this the question would be
+    /// raised again a second later, and the only way to keep a machine awake
+    /// would be to sit and cancel a popup every second until the grace window
+    /// ran out. Cleared when the timer is armed or disarmed, so the next
+    /// question is a new one.
+    power_asked: bool,
 }
 
 
@@ -226,6 +239,7 @@ pub fn ensure(
         settings: SettingsForm::from_config(cfg),
         notice: None,
         handed_back: false,
+        power_asked: false,
         speed,
         prev_running: false,
         selected_port: None,
@@ -378,6 +392,82 @@ impl UiState {
                         Some(format!("could not stop {name} — try running as administrator"));
                 }
             }
+            Action::PowerTimer { action } => {
+                // Disarmed first, and before the call rather than after: a
+                // suspend that succeeds never returns, so a clear written
+                // afterwards would be a line that only ever ran on the failure
+                // path and the timer would fire again the moment the machine
+                // woke. The file is the only record, so it goes down first.
+                self.cfg.timer.enabled = false;
+                self.cfg.timer.armed.clear();
+                let written = self.cfg.save();
+                self.handed_back = true;
+                let done = match action {
+                    power::Action::Sleep => power::sleep(),
+                    power::Action::Shutdown => power::shutdown(),
+                };
+                self.notice = Some(match (done, written) {
+                    (Ok(()), _) => format!("{} now", action.label().to_lowercase()),
+                    // Windows refused it. Said plainly and with the timer left
+                    // disarmed, because the alternative — silently re-arming
+                    // and trying again a minute later — is a machine that
+                    // shuts down an hour after the user cancelled.
+                    (Err(e), _) => e,
+                });
+            }
+        }
+    }
+
+    /// A Cancel on the power timer: the machine stays up, and so does the
+    /// timer's arm come down.
+    ///
+    /// Disarmed rather than merely unanswered, because a question that has been
+    /// answered *no* is answered: leaving it armed would put the same popup back
+    /// on screen a second later and the only way to keep working would be to
+    /// keep cancelling it. The stored stamp goes with the arm, exactly as
+    /// `toggle_arm`'s disarm does — the same state change reached from two
+    /// places, so both read the same three fields.
+    fn cancel_power_timer(&mut self, hwnd: HWND, action: power::Action) {
+        self.cfg.timer.enabled = false;
+        self.cfg.timer.armed.clear();
+        let written = self.cfg.save();
+        self.handed_back = true;
+        self.notice = Some(match written {
+            Ok(()) => format!("{} called off", action.label().to_lowercase()),
+            Err(e) => format!("called off, but could not write the config: {e}"),
+        });
+        // The page behind the popup is showing a timer that no longer exists:
+        // the watch goes with the arm, the button relabels itself to "Arm", and
+        // the four fields go back to what is on disk. `set_timer_tick` clears
+        // `power_asked` as it goes, so the same instant asked about twice is a
+        // new question if it is ever asked again.
+        self.refresh_timer_page(hwnd);
+    }
+
+    /// Put the Timer page back in step with the config, after something other
+    /// than the page itself changed the timer.
+    ///
+    /// Three calls that always travel together: the watcher follows the arm, the
+    /// button names it, and the four fields show what was saved.
+    fn refresh_timer_page(&mut self, hwnd: HWND) {
+        set_timer_tick(hwnd, self);
+        sync_arm_button(hwnd, self);
+        sync_timer_fields(hwnd, &self.cfg);
+    }
+
+    /// Take the question down without answering it — `Esc`, or a page change.
+    ///
+    /// The two ways out of the popup that are not a click, and the reason this
+    /// is a method rather than the bare `Modal::dismiss` it looks like: a power
+    /// question walked away from is a question answered *no*, and leaving the
+    /// timer armed would put the same popup back a second later with no way to
+    /// refuse it. Every other question is a shrug — the port row it was about
+    /// may still be there when the user comes back to it.
+    fn dismiss_modal(&mut self, hwnd: HWND) {
+        let asked = self.modal.pending_action();
+        self.modal.dismiss();
+        if let Some(Action::PowerTimer { action }) = asked {
+            self.cancel_power_timer(hwnd, action);
         }
     }
 
@@ -506,6 +596,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     create_settings(hwnd, s);
                     layout(hwnd, s);
                     chrome(hwnd, s);
+                    // A timer armed in an earlier run is already live when the
+                    // dashboard is first opened, so the tick has to start here
+                    // and not only on an Arm click.
+                    set_timer_tick(hwnd, s);
                 }
                 LRESULT(0)
             }
@@ -565,7 +659,22 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             // the page differ from disk — the same reason the
                             // quota switch clears it.
                             s.notice = None;
+                            // A background picked by hand moves the appearance
+                            // row too: the row's word and glyph describe which
+                            // way the page goes, and the box just written is the
+                            // only thing that knows.
+                            s.settings = read_form(hwnd);
+                            write_theme_button(hwnd, &s.settings.background());
+                            let _ = InvalidateRect(Some(hwnd), None, false);
                         }
+                    } else if id == SET_THEME {
+                        // Types into the two colour fields rather than applying
+                        // anything: the page stays staged behind Save, so this
+                        // is undoable by pressing Reload, and the window keeps
+                        // the colours it has until the user commits.
+                        let caption = apply_preset(hwnd, s);
+                        s.notice = Some(format!("{caption} colours — press Save to apply"));
+                        repaint_after_settings(hwnd, s);
                     } else if id == SET_SAVE {
                         let notice = save_settings(hwnd, s);
                         s.notice = Some(notice);
@@ -613,6 +722,46 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         // back to "Start".
                         set_watch_timer(hwnd, false);
                         sync_watch_button(hwnd, s);
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if id == SET_TIMER_MODE {
+                        // One button for both directions, like the Stopwatch's.
+                        // The caption is the selection, so it is read back from
+                        // the same `power` enum the engine will parse rather
+                        // than from a table here that could drift from it.
+                        let form = read_timer(hwnd);
+                        let mode = power::Mode::parse(&form.mode).unwrap_or(power::Mode::AtTime);
+                        let mut form = form;
+                        form.mode = mode.flipped().key().to_string();
+                        set_text(hwnd, SET_TIMER_MODE, mode.flipped().label());
+                        // The other field greys out on the same click: which of
+                        // the two is live is a property of the mode, not of what
+                        // the user has typed into either.
+                        match mode.flipped() {
+                            power::Mode::AtTime => {
+                                set_enabled(hwnd, SET_TIMER_AT, true);
+                                set_enabled(hwnd, SET_TIMER_WAIT, false);
+                            }
+                            power::Mode::Countdown => {
+                                set_enabled(hwnd, SET_TIMER_AT, false);
+                                set_enabled(hwnd, SET_TIMER_WAIT, true);
+                            }
+                        }
+                        s.notice = None;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if id == SET_TIMER_ACTION {
+                        let form = read_timer(hwnd);
+                        let action = power::Action::parse(&form.action).unwrap_or(power::Action::Sleep);
+                        set_text(hwnd, SET_TIMER_ACTION, action.flipped().label());
+                        s.notice = None;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    } else if id == SET_TIMER_ARM {
+                        let notice = toggle_arm(hwnd, s);
+                        s.notice = Some(notice);
+                        // The arm button's verb and the page's status line are
+                        // both ours to draw, and neither arrives with a sample.
+                        sync_arm_button(hwnd, s);
+                        sync_timer_fields(hwnd, &s.cfg);
+                        set_timer_tick(hwnd, s);
                         let _ = InvalidateRect(Some(hwnd), None, false);
                     } else if id == SET_RESET {
                         // Back to what is on disk — not to the built-in
@@ -719,11 +868,36 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // while it is up — that is what makes it a modal rather than
                     // a floating panel.
                     if s.modal.is_open() {
-                        match s.modal.click(&client, s.dpi, x, y) {
-                            Some(Outcome::Confirmed(action)) => s.run_action(action),
-                            // Dismissed, or a click that landed on nothing.
-                            // Either way the frame just loses the scrim.
-                            Some(Outcome::Cancelled) | None => {}
+                        // Read before the click, because the click takes the
+                        // question down as it answers it: a Cancel has to know
+                        // *what* it is a no to. Saying no to the power timer
+                        // disarms it, while a click that merely missed a port
+                        // button leaves that question as it was.
+                        let asked = s.modal.pending_action();
+                        let outcome = s.modal.click(&client, s.dpi, x, y);
+                        match outcome {
+                            Some(Outcome::Confirmed(action)) => {
+                                let was_power =
+                                    matches!(action, Action::PowerTimer { .. });
+                                s.run_action(action);
+                                // Only on the failure path — a suspend that
+                                // succeeds never returns — but that is exactly
+                                // the path the page has to be right about, since
+                                // it is the one the user is still sitting in
+                                // front of.
+                                if was_power {
+                                    s.refresh_timer_page(hwnd);
+                                }
+                            }
+                            Some(Outcome::Cancelled) => {
+                                if let Some(Action::PowerTimer { action }) = asked {
+                                    s.cancel_power_timer(hwnd, action);
+                                }
+                            }
+                            // A click that landed on nothing: the question went
+                            // back exactly as it was and the frame only loses
+                            // the scrim for as long as it takes to repaint.
+                            None => {}
                         }
                         let _ = InvalidateRect(Some(hwnd), None, false);
                         return LRESULT(0);
@@ -732,7 +906,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     if let Some(page) = sidebar::hit_test(s, x, y) {
                         // A question about a row on the page being left is a
                         // question about nothing.
-                        s.modal.dismiss();
+                        s.dismiss_modal(hwnd);
                         // `select` shows and hides the Settings controls and
                         // invalidates, so the repaint is not repeated here.
                         sidebar::select(hwnd, s, page);
@@ -808,7 +982,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // change under it is a modal the user can lose.
                     if s.modal.is_open() {
                         if wparam.0 as u16 == VK_ESCAPE.0 {
-                            s.modal.dismiss();
+                            s.dismiss_modal(hwnd);
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
                         return LRESULT(0);
@@ -837,12 +1011,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 LRESULT(0)
             }
 
-            // The Stopwatch page's clock, and the only thing this window ever
-            // ticks on. Armed by a Start and killed by a Stop or a Reset, so it
-            // cannot arrive while the clock is paused — which is what keeps the
-            // page static when it should be, rather than repainting four
-            // identical frames a second.
+            // The Stopwatch page's clock. Armed by a Start and killed by a Stop
+            // or a Reset, so it cannot arrive while the clock is paused — which
+            // is what keeps the page static when it should be, rather than
+            // repainting four identical frames a second.
             WM_TIMER if wparam.0 == TIMER_WATCH => {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                LRESULT(0)
+            }
+
+            // The power timer's watch. Armed only while a timer is, and the
+            // only timer here whose tick decides anything: it can raise the
+            // confirmation popup, and without an answer it disarms rather than
+            // fires. Everything the countdown on the page shows is redrawn by
+            // the invalidate either way.
+            WM_TIMER if wparam.0 == TIMER_POWER => {
+                if !state.is_null() {
+                    poll_power_timer(hwnd, &mut *state);
+                }
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
@@ -926,13 +1112,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 /// one number, so the cost is a repaint of a small window.
 ///
 /// The id is arbitrary but must be unique among this window's timers, of which
-/// there are none besides this one.
+/// there are two — the other is `TIMER_POWER` below.
 const TIMER_WATCH: usize = 1;
 const WATCH_TICK_MS: u32 = 100;
 
 /// Arm or disarm the Stopwatch page's repaint timer.
 ///
-/// A win32 timer owned by this window, and the only one it owns. The clock
+/// A win32 timer owned by this window. The clock
 /// cannot ride the tray's own tick: that is a second at its shortest, and a
 /// user who set `interval_ms` to a minute would be watching a stopwatch that
 /// advanced once a minute — which is not a slower stopwatch, it is a broken one.
@@ -948,6 +1134,120 @@ fn set_watch_timer(hwnd: HWND, running: bool) {
         } else {
             let _ = KillTimer(Some(hwnd), TIMER_WATCH);
         }
+    }
+}
+
+/// The window timer that watches the sleep / shut-down timer, and how often it
+/// looks.
+///
+/// A second, for a decision graded in minutes: the confirmation is raised a
+/// minute out and the fire is acted on within a second of coming due, so five
+/// seconds would be plenty. A second is chosen anyway because it keeps the
+/// countdown on the page moving, and the repaint is one invalidate.
+///
+/// Id 2, beside the Stopwatch's 1 — the numbers must be unique per window and
+/// nothing else here owns a timer.
+const TIMER_POWER: usize = 2;
+const POWER_TICK_MS: u32 = 1000;
+
+/// Arm or disarm the power timer's watch.
+///
+/// Armed by an Arm click and killed by a Disarm, so a machine with no timer set
+/// pays nothing for the feature. The state it watches lives in the config rather
+/// than in this window, so this is a pure function of that config and is safe to
+/// call on every path that changes it — `SetTimer` on an armed id only resets
+/// the interval rather than adding a second timer.
+fn set_timer_tick(hwnd: HWND, state: &mut UiState) {
+    // Whatever happens next is a different question from the one on screen —
+    // a re-arm names a new instant, and a disarm means there is nothing left to
+    // ask about. Either way the flag goes with it.
+    state.power_asked = false;
+    // SAFETY: our own window, and an id no other timer here claims.
+    unsafe {
+        if state.cfg.timer.enabled {
+            SetTimer(Some(hwnd), TIMER_POWER, POWER_TICK_MS, None);
+        } else {
+            let _ = KillTimer(Some(hwnd), TIMER_POWER);
+        }
+    }
+}
+
+/// One look at the power timer: raise the question, or answer it.
+///
+/// The engine owns every decision here — `power::phase` says which of the four
+/// states the instant is in, and the grace window inside it is what keeps a
+/// laptop that was suspended before midnight from being put straight back to
+/// sleep the moment it wakes with a stale target behind it.
+///
+/// Called from the tick. It takes `&mut UiState` because it raises the modal,
+/// and it never fires anything itself: `run_action` is the only caller of
+/// `power::sleep`/`power::shutdown`, and it runs only once the popup has been
+/// answered.
+fn poll_power_timer(hwnd: HWND, state: &mut UiState) {
+    if !state.cfg.timer.enabled || state.modal.is_open() || state.power_asked {
+        return;
+    }
+    let now = power::now();
+    let Some(when) = power::fire_at(&state.cfg.timer, &now) else {
+        return;
+    };
+    match power::phase(&when, &now) {
+        // The minute before: ask, once. The countdown in the body is what makes
+        // a mistyped time harmless — the question is on screen with a Cancel
+        // beside it for a full minute before anything happens.
+        power::Phase::Warning => {
+            state.power_asked = true;
+            state.modal.open(power_question(state, &when));
+            // SAFETY: our own window; the popup is painted, not a child.
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+        }
+        // Past its minute but still inside the grace window, and the question
+        // was answered with a Cancel — or was never raised, because the machine
+        // was asleep through it. Treated as spent rather than re-asked: a timer
+        // that comes back from a suspend and immediately shuts the machine down
+        // is worse than one that misses its night.
+        power::Phase::Due | power::Phase::Stale => {
+            state.cfg.timer.enabled = false;
+            state.cfg.timer.armed.clear();
+            let _ = state.cfg.save();
+            state.handed_back = true;
+            state.notice = Some(format!(
+                "timer passed at {} without confirming — disarmed",
+                power::format_stamp(&when)
+            ));
+            set_timer_tick(hwnd, state);
+            sync_arm_button(hwnd, state);
+            // SAFETY: as above.
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+        }
+        power::Phase::Waiting => {}
+    }
+}
+
+/// The question the power timer raises a minute before it fires.
+///
+/// The countdown is recomputed from the same instant the engine will fire on,
+/// so the number in the sentence and the number the watcher is counting are one
+/// number.
+fn power_question(state: &UiState, when: &SYSTEMTIME) -> Confirm {
+    let action = power::action_of(&state.cfg.timer);
+    let secs = power::seconds_until(when, &power::now());
+    Confirm {
+        title: format!("{} in {}?", action.label(), power::format_countdown(secs)),
+        body: format!(
+            "The timer is set for {}. Cancel to stop it, or let it run and the machine will {}.",
+            power::format_stamp(when),
+            if action == power::Action::Shutdown {
+                "shut down"
+            } else {
+                "sleep"
+            }
+        ),
+        action: Action::PowerTimer { action },
     }
 }
 

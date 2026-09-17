@@ -167,8 +167,56 @@ pub(crate) const ICON_SPEED: u16 = 0xE945;
 /// alarm clock at `0xE917` as well; the stem is what tells the two apart at
 /// 16 pixels, and this is the one that is not already a clock reading.
 pub(crate) const ICON_STOPWATCH: u16 = 0xE916;
+/// The face's own timer glyph — a dial with a hand, distinct from the stopwatch
+/// stem above it at 16 pixels.
+pub(crate) const ICON_TIMER: u16 = 0xE823;
+
+/// The dark-mode glyph, for the button that puts the window in one.
+///
+/// One constant rather than a sun/moon pair: the button says what it switches
+/// *to*, and it is drawn from the configuration rather than from a stored mode
+/// — see `next_preset`, which is also what decides which one it is.
+pub(crate) const ICON_MOON: u16 = 0xE708;
+/// The light-mode glyph, the other half of the pair above.
+pub(crate) const ICON_SUN: u16 = 0xE706;
 
 /// The glyph a sidebar entry leads with, by page index.
+/// The glyph for the appearance button: the mode it leads to.
+pub(crate) fn theme_glyph(next_is_dark: bool) -> u16 {
+    if next_is_dark { ICON_MOON } else { ICON_SUN }
+}
+
+/// The named presets the appearance button swaps between.
+///
+/// A preset is a pair of hex strings and nothing else, because that is all the
+/// theme already is: `theme::background`/`foreground` parse `cfg.theme`, and
+/// `palette` derives every other colour from the two. A `preset` field beside
+/// them would be a second place the appearance is written down; the button
+/// instead *types into the two fields*, which is why it lives on the Settings
+/// page and is staged behind Save like every other field there.
+///
+/// Two, deliberately. A light theme is not a checkbox on a dark one — every
+/// palette entry is derived — so this is the whole of the choice.
+pub(crate) const DARK_PRESET: (&str, &str) = ("#000000", "#E6E6E6");
+pub(crate) const LIGHT_PRESET: (&str, &str) = ("#FFFFFF", "#1C1C1E");
+
+/// The two colours the appearance button would write, and the word for them.
+///
+/// Takes the background as it stands *on the page* rather than the saved config,
+/// so a colour the user has just picked and not yet saved still decides which
+/// way the toggle goes. The test is the same luma the whole palette is built
+/// on, so "the window looks light" and "the button offers dark" cannot disagree
+/// — and an unparseable hex falls back to the dark preset, which is the theme
+/// the app ships with.
+pub(crate) fn next_preset(background: &str) -> (bool, &'static str, &'static str, &'static str) {
+    let dark_now = crate::taskbar::render::parse_color(background)
+        .map(|c| luma(c) < 128)
+        .unwrap_or(true);
+    let next_dark = !dark_now;
+    let (bg, fg) = if next_dark { DARK_PRESET } else { LIGHT_PRESET };
+    (next_dark, if next_dark { "Dark" } else { "Light" }, bg, fg)
+}
+
 pub(crate) fn page_icon(page: usize) -> u16 {
     match page {
         crate::ui::pages::OVERVIEW => ICON_OVERVIEW,
@@ -178,6 +226,7 @@ pub(crate) fn page_icon(page: usize) -> u16 {
         crate::ui::pages::PORTS => ICON_PORTS,
         crate::ui::pages::SPEEDTEST => ICON_SPEED,
         crate::ui::pages::STOPWATCH => ICON_STOPWATCH,
+        crate::ui::pages::TIMER => ICON_TIMER,
         crate::ui::pages::SETTINGS => ICON_SETTINGS,
         // Not reachable: the page is clamped to `PAGES` before it gets here.
         // The overview's glyph is a better answer than a blank column anyway.
@@ -363,6 +412,32 @@ mod tests {
         // The accent is not a tint of the theme: a saturated blue has to be
         // chosen per appearance or it loses its contrast on the other one.
         assert_eq!(light.accent, ACCENT_LIGHT);
+    }
+
+    #[test]
+    fn the_appearance_toggle_offers_the_other_one_and_lands_on_it() {
+        // The row reads "the mode this switches to", so the two things to get
+        // wrong are offering the mode already in force and writing a pair that
+        // does not actually produce the mode named. Both are checked by feeding
+        // the preset back in: the second click has to come back where it began.
+        let (next_dark, caption, bg, fg) = next_preset(DARK_PRESET.0);
+        assert!(!next_dark, "a dark window's button offers the light one");
+        assert_eq!(caption, "Light");
+        assert_eq!((bg, fg), LIGHT_PRESET);
+        let (back_dark, back_caption, back_bg, back_fg) = next_preset(bg);
+        assert!(back_dark, "the dark preset has to read back as dark");
+        assert_eq!(back_caption, "Dark");
+        assert_eq!((back_bg, back_fg), DARK_PRESET);
+
+        // And the two presets are genuinely opposite, which is the property a
+        // hand-edited pair of hex strings could quietly lose.
+        assert!(luma(parse_color(LIGHT_PRESET.0).unwrap()) >= 128);
+        assert!(luma(parse_color(DARK_PRESET.0).unwrap()) < 128);
+        // A field holding nothing usable falls back to the theme the app ships
+        // with — dark — rather than to a light window nobody asked for, so the
+        // button then offers the light one.
+        assert!(!next_preset("").0);
+        assert!(!next_preset("#GGGGGG").0);
     }
 
     #[test]

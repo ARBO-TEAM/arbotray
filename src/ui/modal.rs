@@ -54,6 +54,36 @@ pub(crate) enum Action {
     /// End the process holding a port: its pid, and what to call it in the
     /// question.
     StopPort { pid: u32, name: String },
+    /// Let the power timer do what it was armed for. The action is the engine's
+    /// own enum rather than a copy of it here, so the popup cannot agree with
+    /// the page while disagreeing with the thing that fires.
+    PowerTimer { action: crate::power::Action },
+}
+
+impl Action {
+    /// The word on the confirming button.
+    ///
+    /// Per action rather than one word for every question: "Stop" on a port and
+    /// "Stop" on a shut-down are not the same commitment, and the button is the
+    /// last thing read before the machine goes down.
+    pub(crate) fn confirm_label(&self) -> &'static str {
+        match self {
+            Action::StopPort { .. } => "Stop",
+            Action::PowerTimer { action } => action.label(),
+        }
+    }
+
+    /// Whether confirming this ends something the user cannot get back.
+    ///
+    /// A suspend is recoverable — the mouse brings the machine back with every
+    /// window where it was left — so only a shut-down wears the danger colour.
+    /// Killing a process is the other one, and for the same reason.
+    pub(crate) fn danger(&self) -> bool {
+        match self {
+            Action::StopPort { .. } => true,
+            Action::PowerTimer { action } => *action == crate::power::Action::Shutdown,
+        }
+    }
 }
 
 /// One question: what it says, and what a yes does.
@@ -93,6 +123,17 @@ impl Modal {
 
     pub(crate) fn open(&mut self, confirm: Confirm) {
         self.pending = Some(confirm);
+    }
+
+    /// What the question on screen would do, without answering it.
+    ///
+    /// Cloned out rather than borrowed because the callers ask *before* the
+    /// click — which takes the question down as it answers — and because a
+    /// dismissal is an answer to one question and a shrug at another: the power
+    /// timer has to be disarmed by a Cancel, while a Stop click that cancels a
+    /// port question must leave it alone.
+    pub(crate) fn pending_action(&self) -> Option<Action> {
+        self.pending.as_ref().map(|c| c.action.clone())
     }
 
     /// Dismiss without confirming. Also what `Esc` does, and what a page change
@@ -234,8 +275,8 @@ pub(crate) fn paint(dc: HDC, client: &RECT, modal: &Modal, fonts: &Fonts, pal: &
             dc,
             fonts,
             &r.confirm,
-            "Stop",
-            matches!(confirm.action, Action::StopPort { .. }),
+            confirm.action.confirm_label(),
+            confirm.action.danger(),
             pal,
             dpi,
         );

@@ -9,7 +9,7 @@ use crate::taskbar::TrayModel;
 /// `Settings` is **appended**. These indices are positional, so inserting it
 /// anywhere but the end would renumber every page after it — the labels would
 /// still read correctly and the routing would be wrong.
-pub(crate) const PAGES: [&str; 8] = [
+pub(crate) const PAGES: [&str; 9] = [
     "Overview",
     "Network",
     "System",
@@ -17,6 +17,7 @@ pub(crate) const PAGES: [&str; 8] = [
     "Ports",
     "Speed Test",
     "Stopwatch",
+    "Timer",
     "Settings",
 ];
 pub(crate) const OVERVIEW: usize = 0;
@@ -26,7 +27,8 @@ pub(crate) const DATA: usize = 3;
 pub(crate) const PORTS: usize = 4;
 pub(crate) const SPEEDTEST: usize = 5;
 pub(crate) const STOPWATCH: usize = 6;
-pub(crate) const SETTINGS: usize = 7;
+pub(crate) const TIMER: usize = 7;
+pub(crate) const SETTINGS: usize = 8;
 
 // --- pages ----------------------------------------------------------------
 
@@ -117,6 +119,10 @@ pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, St
         // sits, because a clock and the control that runs it are one thing.
         // Without its own arm it would fall through to the overview below.
         STOPWATCH => {}
+        // The Timer page reads like the Stopwatch one: what it has to say is a
+        // clock and a state, drawn by the painter under the controls that set
+        // them. Nothing here, and for the same reason.
+        TIMER => {}
         // The Settings page has no metric on it: every line it shows is a
         // caption from `SET_ROW_LABELS` beside a control. Without this arm it
         // would fall through to the overview below and paint the traffic

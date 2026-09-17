@@ -91,6 +91,29 @@ pub(crate) const SET_PICK_BG: i32 = SET_ID_BASE + 24;
 pub(crate) const SET_PICK_FG: i32 = SET_ID_BASE + 25;
 pub(crate) const SET_PICK_ALERT: i32 = SET_ID_BASE + 26;
 
+/// The Settings page's appearance button: one click, from wherever the window
+/// is now to the other preset.
+///
+/// It is a button that *types into the two colour fields* rather than a mode of
+/// its own, which is why it has no config field beside it — the two hex strings
+/// under it are the whole answer, and a `theme.preset` next to them would be a
+/// second place the appearance is written down and a first place it can be
+/// wrong.
+pub(crate) const SET_THEME: i32 = SET_ID_BASE + 32;
+
+/// The Timer page's five, in the order the page reads them.
+///
+/// A page of their own rather than rows on the Settings form, because the arm
+/// button is not a setting: everything above it is stored in `config.json` and
+/// survives a restart, and the arm is a decision about tonight that deliberately
+/// does not. Putting them on the Settings page would put the one control that is
+/// not staged behind Save beside twelve that are.
+pub(crate) const SET_TIMER_MODE: i32 = SET_ID_BASE + 27;
+pub(crate) const SET_TIMER_AT: i32 = SET_ID_BASE + 28;
+pub(crate) const SET_TIMER_WAIT: i32 = SET_ID_BASE + 29;
+pub(crate) const SET_TIMER_ACTION: i32 = SET_ID_BASE + 30;
+pub(crate) const SET_TIMER_ARM: i32 = SET_ID_BASE + 31;
+
 /// Nothing in the page is live until Save runs, so the page has to say so.
 ///
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings

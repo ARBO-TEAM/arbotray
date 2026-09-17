@@ -9,11 +9,15 @@
 
 use crate::ui::components::{Canvas, Fonts, draw};
 use crate::ui::design::{S2, S3, palette};
+use crate::power;
 use crate::ui::pages::{
-    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, page_rows, page_section,
+    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER, page_rows, page_section,
     page_shows_graph, usage_rows,
 };
-use crate::ui::settings::{ROW_DIVIDER, SET_ROW_LABELS, field_drop, foot_button_top};
+use crate::ui::settings::{
+    FIELD_DROP, ROW_APPEARANCE, ROW_DIVIDER, SET_ROW_LABELS, TIMER_LABELS, field_drop,
+    foot_button_top,
+};
 use crate::ui::theme::scale;
 use crate::ui::{
     CLOCK_EXTRA, PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState,
@@ -80,6 +84,11 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             // ponytail: caption == body; add a face when a page needs two.
             caption: state.font,
             clock: state.clock,
+            // Not a field of `UiState` like the four above: the icon face is
+            // built and cached in `design` from the config's font size, and the
+            // sidebar reads the same one. A fifth handle here would be a second
+            // place for it to be built at a second size.
+            icon: crate::ui::design::icon_font(&state.cfg, state.dpi),
         };
         // The heading gets its own band — a title is larger than a row and has
         // air under it — and everything after it is rows on `row_h` bands,
@@ -325,6 +334,49 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             }
         }
 
+        // The Timer page. First the four captions, on the bands
+        // `layout_settings` puts their controls on — the same arithmetic as the
+        // Settings page below, from the same `form_top` and the same
+        // `FIELD_DROP`, because a control placed by one function and labelled by
+        // another has only those constants keeping them together.
+        if page == TIMER {
+            for label in TIMER_LABELS.iter() {
+                // Every row here has a control beside its caption, so every row
+                // takes the drop — the one difference from the Settings page,
+                // whose tile grid alone has none.
+                c.row_aligned(label, "", scale(FIELD_DROP, state.dpi));
+            }
+
+            // What the four above add up to, under them. Read from the config and
+            // not from the controls, so the line can only ever name an instant
+            // that was actually saved — a typed `23:00` that was never armed is
+            // not a timer, and the page must not draw it as one.
+            c.section("Armed for");
+            if !state.cfg.timer.enabled {
+                c.empty("Off. Press Arm to switch it on.");
+            } else if let Some(when) = power::fire_at(&state.cfg.timer, &power::now()) {
+                // The instant in the clock's own face, as on the Stopwatch
+                // page: it is the number this page exists to show, and a row
+                // would clip a face taller than a band of body text.
+                let stamp = power::format_stamp(&when);
+                SetTextColor(dc, pal.text);
+                draw(dc, fonts.clock, &stamp, x0, c.y() + scale(S3, state.dpi), x1, DT_LEFT);
+                c.space(scale(CLOCK_EXTRA + 2 * S2, state.dpi));
+                // What and how long, under it. The countdown is recomputed from
+                // the same instant the watcher grades, so the number on screen
+                // and the number in the confirmation are one number.
+                let secs = power::seconds_until(&when, &power::now());
+                c.note(
+                    &format!(
+                        "{} in {}",
+                        power::action_of(&state.cfg.timer).label(),
+                        power::format_countdown(secs)
+                    ),
+                    pal.muted,
+                );
+            }
+        }
+
         // The Settings page's captions. They sit on the same bands as the
         // controls `layout_settings` places, from the same constants, so a row
         // and its caption cannot drift even though two functions draw them.
@@ -345,6 +397,20 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                     // other three sit on the form's own rows, whose captions are
                     // drawn behind their controls.
                     c.space(row_h);
+                } else if row == ROW_APPEARANCE {
+                    // The one caption here that leads with a glyph, and the one
+                    // that names the mode the button beside it switches *to*
+                    // rather than the setting it edits. Read from the field
+                    // under it and not from the saved config, so a background
+                    // the user has picked but not yet saved already decides
+                    // which way the toggle goes.
+                    let (next_dark, caption, _, _) =
+                        crate::ui::design::next_preset(&state.settings.background());
+                    c.row_glyph(
+                        crate::ui::design::theme_glyph(next_dark),
+                        caption,
+                        scale(FIELD_DROP, state.dpi),
+                    );
                 } else {
                     // The caption drops to the middle of the field beside it:
                     // a native field centres its own text while a row draws

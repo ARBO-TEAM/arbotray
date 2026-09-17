@@ -22,7 +22,7 @@ use crate::ui::components::{draw, glyph, rounded_fill};
 use crate::ui::design::{ICON_COL, ITEM_H, RADIUS, S2, S3, page_icon, palette};
 use crate::ui::layout::{ROW_H, VALUE_OFFSET};
 use crate::ui::pages::PAGES;
-use crate::ui::settings::show_controls;
+use crate::ui::settings::{show_controls, sync_arm_button, sync_timer_fields};
 use crate::ui::theme::{scale, sidebar_w};
 use crate::ui::UiState;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -74,6 +74,14 @@ pub(crate) fn select(hwnd: HWND, state: &mut UiState, page: usize) {
     }
     state.page = page;
     show_controls(hwnd, page);
+    // The Timer page's two state-bearing captions — the arm button's verb and
+    // which of its two fields is live. Refreshed here rather than only where the
+    // config changes, because these are the controls that decide whether they
+    // are shown at all: arriving on the page is the only moment either is read.
+    if page == crate::ui::pages::TIMER {
+        sync_arm_button(hwnd, state);
+        sync_timer_fields(hwnd, &state.cfg);
+    }
     // SAFETY: our own window, and an invalidation only asks for a repaint.
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);

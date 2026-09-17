@@ -152,9 +152,10 @@ pub(crate) unsafe fn hairline(dc: HDC, x0: i32, x1: i32, y: i32, colour: COLORRE
 
 /// The faces a component draws with, gathered once per frame.
 ///
-/// The icon face is not among them: only the sidebar draws glyphs, and it sizes
-/// its own from `design::icon_font`, so carrying a fifth handle here would be a
-/// field every page pays for and one of them uses.
+/// `icon` travels with them because two places draw a glyph now — the sidebar
+/// and the Settings page's appearance row — and the sidebar sizes its own from
+/// the same cached `design::icon_font`, so the two are the same handle and
+/// never two sizes of the same picture in one window.
 pub(crate) struct Fonts {
     pub body: HFONT,
     /// One step heavier, for values, so the numbers lead and the captions
@@ -167,6 +168,8 @@ pub(crate) struct Fonts {
     /// The Stopwatch page's reading. Body-sized on every other page by
     /// construction — nothing but the clock reaches for it.
     pub clock: HFONT,
+    /// The icon face, for the few glyphs drawn inside the content area.
+    pub icon: HFONT,
 }
 
 /// A vertical cursor down one page.
@@ -419,6 +422,33 @@ impl<'a> Canvas<'a> {
         self.y += self.row_h;
     }
 
+    /// A row whose caption leads with a glyph.
+    ///
+    /// The one row in the window that carries an icon outside the sidebar, and
+    /// it is not a whole new component: a glyph is a character in the icon face
+    /// at `x0`, and the caption follows it at the icon column the sidebar
+    /// already reserves, so the two line up with every other glyph in the
+    /// window. `dy` is the field-row drop, because the control beside it is a
+    /// native one and centres its own text.
+    pub(crate) fn row_glyph(&mut self, cp: u16, label: &str, dy: i32) {
+        // SAFETY: a live DC and faces owned by the caller's frame; `glyph` and
+        // `draw` each document their own contract.
+        unsafe {
+            SetTextColor(self.dc, self.text_colour());
+            glyph(self.dc, self.fonts.icon, cp, self.label_x(), self.y + self.nudge + dy);
+            draw(
+                self.dc,
+                self.fonts.body,
+                label,
+                self.label_x() + ICON_COL,
+                self.y + self.nudge + dy,
+                self.x1,
+                DT_LEFT,
+            );
+        }
+        self.y += self.row_h;
+    }
+
     /// A status line under the content rather than in it: what the page did,
     /// not what it is showing.
     pub(crate) fn note(&mut self, text: &str, colour: COLORREF) {
@@ -534,6 +564,7 @@ mod tests {
             title: HFONT::default(),
             caption: HFONT::default(),
             clock: HFONT::default(),
+            icon: HFONT::default(),
         };
         let pal = crate::ui::design::palette(&crate::config::Config::default());
         // A null DC: the text calls no-op against it and the arithmetic under
