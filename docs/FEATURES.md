@@ -1,160 +1,155 @@
 # ArboTray Feature Status
 
-Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.2.0** (`Cargo.toml:3`) — 2026-09-16.
+Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.8.0** (`Cargo.toml:3`) — refreshed 2026-09-17. The previous revision covered v0.2.0.
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
+
+Tree today: 16,695 lines of Rust across `src/`, **237 tests passing, 2 ignored**.
 
 ## Summary
 
 | Feature | Status | Evidence |
 | --- | --- | --- |
-| Live Speed Widget | Done | `src/taskbar/mod.rs:50-54` formats `rx_bps`/`tx_bps` into `down_text`/`up_text`; painted at `src/taskbar/render.rs:243-253` |
-| Always-on-Top Widget | Not done | No `HWND_TOPMOST` / `WS_EX_TOPMOST` anywhere; the only `SetWindowPos` is sidebar layout with `SWP_NOZORDER` (`src/ui/mod.rs:533-541`) |
-| System Tray Icon | Partial | Icon installed and tooltip updated (`src/taskbar/icon.rs:72-104`), but no `NIF_INFO` / balloon → no notifications |
-| Settings (UI) | Done | `Settings` is page 4 of the sidebar (`src/ui/mod.rs` `PAGES`): eight tile checkboxes, interval, quota, font, three colours and opacity, all read/written through control ids and applied by `Config::save()` |
-| Adapter Config | Not done | `GetAdaptersAddresses` now reads the routed interface (`src/telemetry/adapter.rs`), but only to display it — `src/telemetry/network.rs:32-54` still sums every adapter, so there is no per-interface selection or configuration |
-| Dark & Light Theme | Partial | Colours/font/alert fully applied via config JSON (`src/taskbar/render.rs:222-237`, `src/ui/mod.rs:569-574`); no theme picker and `Theme.opacity` is only tested as `== 0` |
-| Dashboard | Partial | Real window with a 5-page sidebar (`PAGES` in `src/ui/mod.rs`) showing the taskbar values, adapter detail, hardware and the usage breakdown, but still no charts — the sparkline is the only graph |
-| Data Plan | Partial | Quota percent + over-quota colour works (`src/app.rs:79-85`, `src/telemetry/usage.rs:145-150`); quota is set by hand-editing JSON and the percentage is never printed |
-| WiFi | Partial | SSID, band and signal read (`src/telemetry/wifi.rs:101-111`); no signal history, no saved-password management, no scan |
-| Network Tools | Not done | No traceroute, DNS check or connection analysis; the only ICMP is a fixed gateway probe |
-| Speed Test | Not done | Zero hits for `speed_test` / `SpeedTest` / `download_test`; no on-demand throughput measurement |
-| Test History | Not done | No test-result model, no persisted history. `usage.json` now holds a week of daily totals, but that is traffic history, not test results |
-| Usage Stats | Done | Rolling window of daily records in `usage.json`, capped by `Retention.days` (`src/telemetry/usage.rs`); the Data page shows today, a month total and the last seven days |
-| Network Info | Done | Gateway address, public-resolver latency, packet loss, adapter name, local IP and resolver list all reach the Network page (`src/telemetry/adapter.rs`, `latency.rs`) |
-| Network Interface | Not done | `GetIfTable2` rows are summed and discarded (`src/telemetry/network.rs:44-50`); no per-interface stats |
-| Active Process | Not done | No `GetProcessIoCounters` / ETW / PID mapping; README documents this as unavailable |
-| Stopwatch | Not done | Zero hits for `stopwatch`; no session timer anywhere |
-| Port Active | Not done | No `GetExtendedTcpTable` / `GetTcpTable` / `GetUdpTable` |
+| Live Speed Widget | Done | `src/taskbar/mod.rs:48-55` formats into `down_text`/`up_text`; painted at `src/taskbar/render.rs:240-253` |
+| Always-on-Top Widget | Done | `src/widget/window.rs:231` `HWND_TOPMOST`; draggable by `HTCAPTION` (`:30`), 4 modules under `src/widget/` |
+| System Tray Icon | Partial | Icon, tooltip and menu complete (`src/taskbar/icon.rs:72-163`), but still no `NIF_INFO` — zero matches tree-wide |
+| Settings (UI) | Done | Page 8 of the sidebar, 16 rows: tiles, interval, plan, font, three colours with pickers, opacity, startup, widget, appearance, Save/Reload |
+| Adapter Config | Not done | `GetAdaptersAddresses` reads the routed interface (`src/telemetry/adapter.rs:95`) but only to display it; no `config.adapter` field exists |
+| Dark & Light Theme | Done | Appearance row swaps both colour fields between presets (`src/ui/design.rs` `next_preset`); staged behind Save |
+| Dashboard | Done | 9-page sidebar (`src/ui/pages.rs:12`), charts with axes (`src/ui/chart.rs`), reusable modal, DPI-scaled |
+| Data Plan | Partial | `quota_gb` is now editable on the Settings page (`ROW_PLAN`, `src/ui/settings.rs:542`); the percentage is still never printed |
+| WiFi | Partial | SSID, band, signal read (`src/telemetry/wifi.rs:101-111`); no scan, no profile management, no history |
+| Network Tools | Not done | Zero matches for `DnsQuery`/`getaddrinfo`/TTL — the only ICMP is the fixed gateway probe |
+| Speed Test | Done | `src/telemetry/speedtest.rs` — on-demand throughput over WinHttp, no new crate |
+| Test History | Done | `HISTORY_MAX = 10` in memory (`src/telemetry/speedtest.rs:70`, `:238-239`) |
+| Usage Stats | Done | Rolling daily records in `usage.json`, capped by `Retention.days`; Data page shows today, month and last seven |
+| Network Info | Done | Gateway, latency, packet loss, adapter, local IP, resolver list (`src/telemetry/adapter.rs`, `latency.rs`) |
+| Network Interface | Not done | `GetIfTable2` rows are still summed into one pair and discarded (`src/telemetry/network.rs:71-103`) |
+| Active Process | Not done | PID→name mapping exists (`src/telemetry/ports.rs:365`) but there is no per-process byte counter |
+| Stopwatch | Done | `src/ui/stopwatch.rs` — start/stop/reset, `HH:MM:SS` on its own page |
+| Port Active | Done | `src/telemetry/ports.rs` — `GetExtendedTcpTable` with owner PID, scrollable list, Stop behind a confirmation |
+| Timer | Done | `src/power.rs` engine + page 7; sleeps or shuts down on a clock time or a countdown, behind a countdown popup |
+| Update check | Done | `src/update.rs` — background check, version on the Settings page, banner when a newer release exists |
+| Start with Windows | Done | `ROW_STARTUP` toggle writing the `Run` key |
 
-Counts: **4 Done, 5 Partial, 9 Not done** — 18 rows, counted from the table above, which is the authority.
+Counts: **15 Done, 4 Partial, 4 Not done** — 23 rows, counted from the table above, which is the authority.
 
-The five dashboard pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Settings` (4). The `OVERVIEW`/`NETWORK`/`SYSTEM`/`DATA`/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
+The nine pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8). The `OVERVIEW`/`NETWORK`/…/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
 
 ## Done
 
 ### Live Speed Widget
-The product's core and complete. `Sampler::poll` reads cumulative octet counters over every up, non-loopback interface and divides the delta by elapsed time (`src/telemetry/network.rs:21-26`, `:72-89`); `TrayModel::from_metric` formats both directions (`src/taskbar/mod.rs:48-55`); the renderer draws them into the taskbar next to the clock (`src/taskbar/render.rs:240-253`), with a 60-sample download sparkline (`src/app.rs:17-18`, `:87-97`). Counter resets are handled as lost deltas rather than spikes (`network.rs:111-115`).
+The product's core and unchanged since v0.2.0. `Sampler::poll` reads cumulative octet counters over every up, non-loopback, hardware interface and divides the delta by elapsed time (`src/telemetry/network.rs`); `TrayModel::from_metric` formats both directions (`src/taskbar/mod.rs:48-55`); the renderer draws them into the taskbar next to the clock, with a 60-sample download sparkline. Counter resets are handled as lost deltas rather than spikes.
+
+### Always-on-Top Widget
+The IMPROVE.md item the v0.2.0 audit recorded as a deliberate divergence, now built as its own top-level window rather than a flag on the taskbar strip. `src/widget/` holds four modules — `window.rs` (creation, drag, topmost, its own paint loop), `render.rs`, `rows.rs`, `metrics.rs` — with tests in three of them. It is `HWND_TOPMOST` (`window.rs:231`), moves by `WM_NCHITTEST` returning `HTCAPTION` (`:30`), and shows traffic plus CPU and RAM rather than the full taskbar string, because at panel size the rest was unreadable.
+
+### System Tray Icon — still no notifications
+Icon, tooltip and the right-click menu are complete, including the drop-time `NIM_DELETE` that prevents ghost icons and the truncating copy that cannot overrun `szTip` (`src/taskbar/icon.rs:86-163`). The missing half is unchanged: no `NIF_INFO`, no balloon, no toast. The icon reflects live speed in its hover text but never pushes an alert.
+
+- Next step: on the existing `WM_TRAY_UPDATE` path, when `quota_alert` flips false→true, call `Shell_NotifyIconW(NIM_MODIFY)` with `uFlags |= NIF_INFO`. Reuse `WindowState.model` to detect the edge; do not add a timer.
+- Dashboard page: none — tray-level.
+
+### Settings page
+Page 8, and the tallest page in the window — which is what `layout::START_H` is pinned to. Sixteen rows: a four-tile grid, a divider, then Refresh, Monthly plan, Font size, Background, Foreground, Alert, Opacity, Start with Windows, Desktop widget, Appearance, and the Save/Reload pair. All three colour rows pair a hex field with a `ChooseColorW` picker (`src/ui/settings.rs:312`); a dismissed dialog writes nothing.
+
+The page never holds a `Config` while the user types — `SettingsForm` keeps raw strings and `into_config` is the single place a typed value becomes a setting, so an emptied numeric field is "no value yet" rather than a `0` that erases the setting. Save writes through `Config::save()`; a write that fails reports it rather than claiming success. Nothing on the page is live until Save runs, and the page says so.
+
+### Dark & Light Theme
+The v0.2.0 audit's "no theme picker, you edit `#RRGGBB` by hand" is closed. The Appearance row (`ROW_APPEARANCE`) carries a glyph and a caption that name the mode the button switches **to**, and one click types the other preset's two colours into the Background and Foreground fields above it.
+
+It is deliberately **not** a `theme.mode` field: a preset is a pair of hex strings and nothing else, because that is all the theme already is. A stored mode beside two colour strings would be a second place the appearance is written down and a first place it can be wrong. Staged behind Save like everything around it, so it is safe to try and safe to undo. `next_preset` reads the luma the whole palette is already built on, so "the window looks light" and "the button offers dark" cannot disagree.
+
+### Dashboard
+Nine pages behind a sidebar, and the shell is no longer the interesting part — the pages have data. `src/ui/chart.rs` draws the sparklines and the labelled charts, `src/ui/modal.rs` is the one reusable confirmation popup (owner-drawn, because a `MessageBoxW` cannot be told that one of its two buttons is destructive), and the whole window is DPI-scaled with `WM_DPICHANGED` relayout. `page_rows` remains the single extension point.
+
+### Usage history — daily and monthly
+`usage.json` keeps a rolling window of daily byte records, oldest first, capped by `Retention.days` (default 7). Both counts come from deltas of the cumulative interface counters, so the totals are exact rather than a sum of rounded rates; a counter that goes backwards is an adapter reset and its delta is dropped rather than underflowing. The Data page shows today, the month total and the last seven days, and the month row's caption becomes `Month so far` when the window no longer reaches the first of the month — a partial sum must not read as month-to-date.
+
+Today's bytes are accumulated from raw counters, persisted to `%APPDATA%\ArboTray\usage.json` at most every 30 s, and rolled over at local midnight. Over-quota recolours the whole taskbar run and the dashboard.
 
 ### Network Info
-`IcmpSendEcho` against the default route and a public resolver, probed every 3 s and cached between polls so the tray never stalls (`src/telemetry/latency.rs`). The gateway is rendered as `NNms` with a `--` placeholder when unreachable; the Network page adds the gateway address, the internet latency, packet loss, the routed adapter's name and local address, and every resolver Windows was handed.
+`IcmpSendEcho` against the default route and a public resolver, probed every 3 s and cached between polls so the tray never stalls (`src/telemetry/latency.rs`). The gateway renders as `NNms` with a `--` placeholder when unreachable; the Network page adds the gateway address, internet latency, packet loss, the routed adapter's name and local address, and every resolver Windows was handed.
 
 Addresses arrive from Win32 in **network byte order** — the bytes are the address and the numeric value is not, so `Ipv4Addr::from(u32)` silently prints `192.168.1.1` as `1.1.168.192`. All of them go through `crate::taskbar::format_addr`, pinned by `addresses_are_read_in_network_byte_order`.
 
-### Usage history — daily and monthly
+### Port Active
+`GetExtendedTcpTable` with `TCP_TABLE_OWNER_PID_ALL`, each PID resolved to a name via `OpenProcess` + `QueryFullProcessImageNameW` (`src/telemetry/ports.rs:365`). The whole list is rendered, scrollable, rather than the first twelve that fit — a dev machine holds more listeners than fit between the counters and the Stop button. Stopping a process goes through the shared modal: the row is selected first, then the Stop button raises the question, and the confirm button wears the danger colour because killing a process is not recoverable.
 
-`usage.json` keeps a rolling window of daily byte records, oldest first, capped by `Retention.days` (default 7). Both counts come from deltas of the cumulative interface counters, so the totals are exact rather than a sum of rounded rates; a counter that goes backwards is an adapter reset and its delta is dropped rather than underflowing. The Data page shows today, the month total and the last seven days, and the month row's caption becomes `Month so far` when the window no longer reaches the first of the month — a partial sum must not read as month-to-date.
+### Stopwatch
+Its own page and its own window timer (`TIMER_WATCH`). Start/Stop/Reset, the reading in the clock face at body height rather than the small text a row would give it, and a caption read back off the clock so a config edited by hand and a page showing the wrong word cannot both be true.
 
-A `usage.json` from the single-day shape loads as an empty window: it does not fail, it starts the day at zero once. That is a deliberate one-time cost, pinned by `a_file_from_the_one_day_shape_still_loads`.
+### Timer
+The sleep / shut-down timer, and the newest feature in the tree. Four settings — mode (a clock time or a countdown), the time, the minutes, and whether to sleep or shut down — plus an Arm button that is deliberately **not** a setting: everything above it is stored in `config.json` and survives a restart, and the arm is a decision about tonight that does not. It writes to disk the moment it is clicked rather than behind Save.
 
-Today's bytes are accumulated from raw counters, not from rounded rates, persisted to `%APPDATA%\ArboTray\usage.json` at most every 30 s, and rolled over at local midnight (`src/telemetry/usage.rs`). Over-quota recolours the whole taskbar run and the dashboard (model flag set in `src/app.rs`; consumed in `src/taskbar/render.rs`).
+`src/power.rs` owns every decision as a pure function: `fire_at`, `phase` (waiting / warning / due / stale), `format_countdown`, `action_of`. The watch is a second window timer armed only while a timer is, so a machine with nothing set pays nothing.
 
-### Settings page (the part that ships)
+Nothing fires without being asked. A minute before the instant the popup comes up carrying a live countdown; Cancel disarms rather than merely answering, because an answered question that stayed armed would be back a second later and the only way to keep a machine up would be to keep cancelling. `Esc` and a page change take the question down the same way, through one method, because all three mean the same thing. The disarmed-before-firing order in `run_action` matters: a suspend that succeeds never returns, so a clear written afterwards would only ever run on the failure path.
 
-`Settings` is page 4: eight tile checkboxes, refresh interval, data plan, font size, three colours and opacity. The page never holds a `Config` while the user types — `SettingsForm` keeps raw strings, and `into_config` is the single place a typed value becomes a setting, so an emptied numeric field is "no value yet" rather than a `0` that erases the setting. Save writes through `Config::save()`; a write that fails reports it rather than claiming success.
+A timer whose moment passed while the machine was asleep is dropped with a note rather than fired at — that is what the engine's five-minute grace window is for.
 
-Two copies of the config used to exist — the window's and the telemetry thread's — which is why a Settings edit could appear to do nothing. Both now read one `Arc<Mutex<Config>>`, re-read per tick.
-
-### Wi-Fi readout
-WLAN API handle opened once and closed on drop; SSID decoded lossily from the raw 32-byte payload with a bounded length (`src/telemetry/wifi.rs`), band derived from the channel number, signal quality 0-100. Shown as `5G 78%` in the taskbar when `show.wifi` is on, and the SSID in the icon tooltip and on the Network page.
+### Update check
+`src/update.rs`: a background check that never blocks a paint, the version printed on the Settings page (`ArboTray 0.8.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
 
 ## Partial
 
 ### System Tray Icon — no notifications
-Icon, tooltip and the right-click menu are complete, including the drop-time `NIM_DELETE` that prevents ghost icons (`src/taskbar/icon.rs:86-114`) and the `Write_tip`-style truncating copy that cannot overrun `szTip` (`:155-163`). What is missing vs IMPROVE.md is "notifikasi langsung dari area system tray": there is no `NIF_INFO`, no balloon, no toast. The icon reflects live speed in its hover text (`src/taskbar/events.rs:86-88`) but never pushes an alert.
+See Done above for what ships. This is the only remaining gap against the original IMPROVE.md wording, and it is worth one small change rather than a subsystem.
 
-- Next step: on the existing `WM_TRAY_UPDATE` path, when `quota_alert` flips false→true, call `Shell_NotifyIconW(NIM_MODIFY)` with `uFlags |= NIF_INFO` and a fixed `szInfo`/`szInfoTitle`. Reuse `WindowState.model` (`events.rs:83-88`) to detect the edge; do not add a timer.
-- Dashboard page: none — tray-level.
+### Data Plan — the percentage is never shown
+`quota_gb` became editable when the Settings page gained its field, which closes half of what the v0.2.0 audit recorded. The other half stands: `quota_pct` is computed (`src/telemetry/usage.rs:251`) and used solely as a boolean — over plan or not — so the user sees a recoloured window but never "42% of plan" anywhere. `clamp_quota_gb` (`src/config/mod.rs:285`) will reject a nonsense entry.
 
-### Dark & Light Theme — no picker, and light mode has never been exercised
-Config-driven colours, font size and the over-quota alert colour are all wired end to end (`src/taskbar/render.rs:222-237`, `:320-341`; `src/ui/mod.rs:569-574`, `:707-729`; both windows do their own DPI scaling and `WM_DPICHANGED` relayout). What is missing: there is no dark/light **mode** — you edit `#RRGGBB` strings in JSON by hand, and `Config::save` has no caller, so the app writes the file exactly never. `Theme.opacity` is read only as `== 0` (`render.rs:222`) so partial transparency is unreachable, and `Retention` (`src/config/mod.rs:52-58`) is parsed and discarded.
-
-- Next step: add a `theme.mode: "dark" | "light" | "system"` field with two built-in palettes that overwrite the four colour strings on load, plus a real `opacity: u8` → alpha path (or document that only 0/255 are honoured).
-- Dashboard page: a new `Settings` page (page index 5) — themes are a preference, not a metric.
-
-### Dashboard — a page list, not yet a dashboard
-The window is real and finished as a shell: lazy creation on first click, hide-on-close (`src/ui/mod.rs:439-442`), a `LISTBOX` sidebar themed through `WM_CTLCOLORLISTBOX` (`:370-379`), sidebar shade derived from the theme's own luminance (`:299-312`), DPI-scaled layout, minimum-size floor, and a test asserting every page in `PAGES` is reachable (`:765-774`). What is missing vs "ringkasan menyeluruh … beserta statistik utama": the four pages render the same eight taskbar strings, plus a sparkline on Overview and Data only (`:244-286`). There are no totals, no peaks, no per-day figures, no adapter table.
-
-- Next step: the pages have no data to show — build the Network Info and Usage Stats collectors below, then add rows to `page_rows` for the matching page. `page_rows` is the single extension point.
-- Dashboard page: Overview (statistics land here), with detail on the other three.
-
-### Data Plan — works, but you cannot set the plan in the app
-Quota percentage and the over-plan colour are correct and deliberately unclamped so overage is visible (`src/telemetry/usage.rs:145-150`). The gaps: `quota_gb` is only settable by editing `%APPDATA%\ArboTray\config.json` before launch (default `0.0` hides the feature entirely, `src/config/mod.rs:19`, `:69`), and `quota_pct` is used solely as a boolean (`src/app.rs:81-84`) — the user never sees "42% of plan" anywhere. Nothing in IMPROVE.md's "mengatur … kuota" is met.
-
-- Next step: add a "Quota" row to the Data page that prints the percentage, and expose `quota_gb` for editing once a settings UI exists (`Config::save` is already written and waiting).
+- Next step: add a "Plan" row to the Data page printing the percentage. `quota_pct` already exists and the collector already runs.
 - Dashboard page: Data.
 
 ### WiFi — read-only, one snapshot
-Band, SSID and signal all work (see Done above). Missing vs "kekuatan sinyal, hingga pengelolaan kata sandi yang tersimpan": no signal history or quality trend, no `WlanGetProfile`/`WlanSetProfile` for saved-network password management, and no `WlanGetAvailableNetworkList` scan — the collector only ever queries the interface that is already connected (`src/telemetry/wifi.rs:115-132`). On a desktop with no WLAN card `poll()` returns `None` and the feature simply disappears, which is correct behaviour but means there is nothing to fall back to.
+Band, SSID and signal all work. Missing against "kekuatan sinyal, hingga pengelolaan kata sandi yang tersimpan": no signal history or trend, no `WlanGetProfile`/`WlanSetProfile`, and no `WlanGetAvailableNetworkList` scan — zero matches tree-wide, since the collector only ever queries the interface already connected. On a desktop with no WLAN card `poll()` returns `None` and the feature disappears, which is correct behaviour but means there is nothing to fall back to.
 
-- Next step: add `WlanGetAvailableNetworkList` for a scan list on the Network page; password management is gated on a settings UI and on writing credentials, which is a larger security decision.
+- Next step: `WlanGetAvailableNetworkList` for a scan list on the Network page. Password management is gated on writing credentials, which is a security decision before it is a coding one.
 - Dashboard page: Network.
+
+### Theme opacity — a switch, not a value
+`theme.opacity` is read only as `== 0` (`src/taskbar/render.rs:222`): zero means "sample the taskbar colour underneath and paint with it", anything else means "use the configured background". So the Settings page's `Opacity   0-255` row offers 256 values and honours two of them.
+
+- Next step: either wire a real alpha path with `AlphaBlend`/`UpdateLayeredWindow`, or narrow the row to a checkbox that says what it actually does. The second is the honest one until someone asks for partial transparency.
+- Dashboard page: none — tray-level.
 
 ## Not done
 
-### Always-on-Top Widget
-The IMPROVE.md item is a floating, draggable, always-topmost widget. ArboTray's design is the opposite: it is a `WS_CHILD` of `Shell_TrayWnd` (`src/taskbar/dock.rs:126-147`) with `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, deliberately docked and unmovable. No `HWND_TOPMOST` / `WS_EX_TOPMOST` appears anywhere, and the dashboard is a normal window using `WS_OVERLAPPEDWINDOW` (`src/ui/mod.rs:172`).
-
-- Next step: treat as a deliberate divergence rather than a gap, or add a docked/strip position choice. A true floating widget means a second top-level window with `WS_EX_TOPMOST`, owning its own paint loop — a new module, not a flag.
-- Dashboard page: none — window-level trait, no page.
-
 ### Adapter Config
-No adapter enumeration or selection. Throughput is the sum of every up non-loopback interface (`src/telemetry/network.rs:44-50`), and the Wi-Fi collector only reports whichever interface the WLAN API says is connected (`src/telemetry/wifi.rs:125-128`). The Windows bindings do include `Win32_NetworkManagement_IpHelper` (`Cargo.toml:15`), so `GetAdaptersAddresses` is available without a dependency change.
+`GetAdaptersAddresses` is available and used (`src/telemetry/adapter.rs:95`, `:200`) but only to *report* the routed interface on the Network page. Throughput is still the sum of every up, non-loopback, hardware interface (`src/telemetry/network.rs:44-50`, `:71-103`), and there is no `config.adapter` field to select one.
 
-- Next step: enumerate adapters with `GetAdaptersAddresses`, list them on the Network page with per-adapter totals, and add a `config.adapter` selector that filters `read_counters`.
-- Dashboard page: Network.
-
-### Network Tools
-Only a fixed gateway ICMP probe exists (`src/telemetry/latency.rs:93-121`). No traceroute, no DNS lookup/check, no connection analysis, no user-entered target — the probe destination is derived internally from `GetBestRoute2` and never exposed.
-
-- Next step: a target input plus `IcmpSendEcho` with a rising TTL gives traceroute; `DnsQuery` or `getaddrinfo` gives the DNS check. Both need an input control, which needs the settings-page infrastructure first.
-- Dashboard page: Network.
-
-### Speed Test
-Nothing. No on-demand measurement, no upload path, no `download_test`. The existing collector measures passive throughput only — it can never generate load (`src/telemetry/network.rs` has no write path; `tx_bps` is read from `row.OutOctets`).
-
-- Next step: largest new subsystem here. Needs an HTTP client (a new dependency — nothing in `Cargo.toml` can fetch), a chosen test endpoint, a progress UI, and a result model. Decide the endpoint and the dependency question first.
-- Dashboard page: Network.
-
-### Test History
-Nothing to store — see Speed Test. No result struct, no persistence beyond the single-day `usage.json` (`src/telemetry/usage.rs:26-33`).
-
-- Next step: blocked on Speed Test; then append results to a JSON list under `%APPDATA%\ArboTray\` and render as a table with timestamps.
+- Next step: list adapters on the Network page with per-adapter totals, and add a `config.adapter` selector that filters `read_counters`. `GetAdaptersAddresses` is already enabled in `Cargo.toml` with no dependency change.
 - Dashboard page: Network.
 
 ### Network Interface
-Per-interface statistics are discarded at the source: `GetIfTable2` rows are iterated and summed into one `(rx, tx)` pair, with only `OperStatus` and loopback used for filtering (`src/telemetry/network.rs:41-53`). No interface name, speed, MTU or error counters survive the loop.
+Per-interface statistics are discarded at the source: `GetIfTable2` rows are iterated and summed into one `(rx, tx)` pair, with only `OperStatus`, loopback and the hardware bit used for filtering. No interface name, speed, MTU or error counter survives the loop.
 
-- Next step: return a `Vec<InterfaceRow>` instead of a summed pair (or add a second function), and render a table. Note `app.rs:74` and `usage.rs` depend on the summed `totals()` contract, so keep that shape and add a parallel detail read.
-- Dashboard page: Network (or System, if framed as hardware).
+- Next step: return a `Vec<InterfaceRow>` instead of a summed pair (or add a second function beside it). Note `app.rs` and `usage.rs` depend on the summed contract, so keep that shape and add a parallel detail read.
+- Dashboard page: Network, or System if framed as hardware.
 
-### Active Process
-Nothing. No `GetProcessIoCounters`, no `EnumProcesses`, no ETW session, no `GetExtendedTcpTable` PID mapping. `docs/PLAN.md:25` reserves a `connections.rs` module for it; that file does not exist. The README states plainly that Windows exposes no per-process byte counter without ETW.
+### Network Tools
+Only a fixed gateway ICMP probe exists (`src/telemetry/latency.rs`). No traceroute, no DNS lookup or check, no connection analysis, no user-entered target — the probe destination is derived internally from `GetBestRoute2` and never exposed.
 
-- Next step: the hardest item. `GetExtendedTcpTable` + `GetProcessIoCounters` gives per-PID totals (not per-connection rates); true real-time per-app bandwidth needs an ETW kernel session. Scope the acceptable approximation before starting.
+- Next step: a target input plus `IcmpSendEcho` with a rising TTL gives traceroute; `getaddrinfo` gives the DNS check. Both need a text-entry control on a page, which the Settings page's field plumbing can now supply.
 - Dashboard page: Network.
 
-### Stopwatch
-Nothing. No timer, no session start/stop, no elapsed-time state. The only timing state anywhere is network-delta interpolation (`src/telemetry/network.rs:62`) and the 30 s save throttle (`src/telemetry/usage.rs:21`).
+### Active Process
+The hardest item, and still the hardest. Per-PID *identification* now exists inside the ports collector — `GetExtendedTcpTable` gives the owner PID and `QueryFullProcessImageNameW` gives its name — but that is which process owns a socket, not how much traffic it moved. There is no `GetProcessIoCounters`, no ETW session, and no per-process byte counter. README states plainly that Windows exposes no cheap per-process byte counter without ETW.
 
-- Next step: trivially self-contained — a start/stop `Instant` plus a `WM_TIMER` (or tick off the existing 1 Hz sample) rendering `HH:MM:SS` on a page. Needs a button, i.e. some UI plumbing the sidebar `LISTBOX` does not currently offer.
-- Dashboard page: Overview (or its own page).
-
-### Port Active
-Nothing. No TCP/UDP table call of any kind: `grep -rE 'GetExtendedTcpTable|GetTcpTable|GetUdpTable' src/` returns zero matches. No listening-port model, no protocol/process display.
-
-- Next step: `GetExtendedTcpTable` with `TCP_TABLE_OWNER_PID_ALL`, then resolve each PID to a name via `OpenProcess` + `QueryFullProcessImageNameW`, and render a scrollable table. Needs `Win32_Networking_WinSock` (already enabled, `Cargo.toml:14`) plus likely `Win32_System_ProcessStatus` (also already enabled).
+- Next step: `GetProcessIoCounters` + the existing PID mapping gives per-PID totals (not per-connection rates, and not network-specific — it counts disk too). True real-time per-app bandwidth needs an ETW kernel session. Scope which approximation is acceptable before starting.
 - Dashboard page: Network.
 
 ## Cross-cutting finding (not an IMPROVE.md item)
 
-`src/taskbar/events.rs` handles an Explorer restart by posting `WM_QUIT`, and the comment there used to claim a supervisor in `app` would re-attach. **No supervisor exists** — `app::run` calls `message_loop()` once and returns, so the process simply exits. The comment now says that instead of promising otherwise; `README.md` already documented it correctly under Known limits. The real fix is a re-attach loop in `app`, and it is not written.
+`src/taskbar/events.rs` handles an Explorer restart by posting `WM_QUIT`, and the comment there is honest about it — there is still **no supervisor**. `app::run` calls `message_loop()` once and returns, so the process simply exits. The real fix is a re-attach loop in `app`, and it is not written. Unchanged from the v0.2.0 audit; not made worse by anything since.
 
 ## Suggested next
 
-Ordered by effort-to-value. Items 1–4 are done; what remains:
+Ordered by effort-to-value:
 
-1. **Speed Test** — highest value of the remaining Premium items but the only one needing a new dependency and a chosen endpoint; decide those two things before writing code.
-2. **Explorer-restart supervisor** — re-attach instead of exiting, now that the comment no longer pretends it exists.
-3. **Notifier balloons** — `NIF_INFO` on the tray icon for quota and speed alerts; the icon is already installed and its tooltip already updates.
-4. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed `totals()` contract that `app` and `usage` depend on.
+1. **Explorer-restart supervisor** — the one outright correctness bug left. Re-attach instead of exiting; the comment already says so.
+2. **Notifier balloons** — `NIF_INFO` on the tray icon for quota alerts. The icon is installed and its tooltip already updates; this is the smallest remaining item.
+3. **Data Plan percentage** — one row on the Data page over a `quota_pct` that already exists.
+4. **Opacity, honestly** — either wire an alpha path or narrow the row. A 0-255 field that honours two values is a small lie in the UI.
+5. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed contract that `app` and `usage` depend on; unlocks Adapter Config after it.
