@@ -1730,6 +1730,46 @@ mod tests {
     }
 
     #[test]
+    fn the_page_buttons_sit_inside_the_window() {
+        // The Stopwatch pair used to be wrapped onto a second row at the foot
+        // of the content column. A second row there starts *below* the client
+        // area, so both buttons were drawn 14 pixels off the bottom edge — and
+        // nothing could notice: `place` is one `SetWindowPos`, and a child
+        // window positioned past its parent's edge is not an error to Windows.
+        // The arithmetic is therefore checked here, where there is no window.
+        let dpi = 96;
+        let x0 = scale(SIDEBAR_W, dpi) + scale(PAD, dpi);
+        let field_w = scale(FIELD_W, dpi);
+        let gap = scale(FIELD_GAP, dpi);
+        let ctl_h = scale(CTL_H, dpi);
+        let foot = foot_button_top(START_H, dpi);
+
+        // Every one of the four is placed on every layout, and only one pair is
+        // ever shown, so the two columns are what has to be told apart.
+        let left = foot_slot(0, x0, field_w, gap, foot, ctl_h);
+        let right = foot_slot(1, x0, field_w, gap, foot, ctl_h);
+
+        assert!(
+            left.1 + ctl_h <= START_H,
+            "the foot row runs to {} in a {START_H}-tall window",
+            left.1 + ctl_h
+        );
+        assert!(
+            left.0 + field_w <= right.0,
+            "the two columns meet: {} then {}",
+            left.0 + field_w,
+            right.0
+        );
+        // And the pair has to fit the content column as well as the window.
+        assert!(
+            right.0 + field_w <= START_W - scale(PAD, dpi),
+            "the foot row runs past the content column"
+        );
+        // Below the heading, or the button is drawn over the page's own title.
+        assert!(foot >= form_top(dpi), "the foot row is above the first band");
+    }
+
+    #[test]
     fn scaled_metrics_never_collapse_to_nothing() {
         assert_eq!(scale(SIDEBAR_W, 96), SIDEBAR_W);
         assert_eq!(scale(SIDEBAR_W, 144), 225);

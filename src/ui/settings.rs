@@ -682,19 +682,28 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         // machine — a control on a band would end up underneath a row the
         // moment the page grew one.
         let foot = foot_button_top(h, state.dpi);
-        // Two columns, two rows. Every one of the four is placed on every
+        // Two columns, one row. Every one of the four is placed on every
         // layout, so no two may share a rectangle — they belong to different
         // pages and only two are ever shown, but "shown" is not something this
-        // function gets to know.
+        // function gets to know. The pairs are in different columns, so the
+        // Speed Test and Ports buttons cannot meet the Stopwatch pair either.
         //
-        // Wrapped rather than run along one line because the content column is
-        // only `MIN_W - SIDEBAR_W - 2 * PAD` = 470 wide at the narrowest window
-        // and its floor: four 150-wide fields with a gap each is 630, which
-        // would push the last two off the edge of the column entirely.
-        place(hwnd, SET_SPEED, x0, foot, field_w, ctl_h);
-        place(hwnd, SET_STOP, x0 + field_w + gap, foot, field_w, ctl_h);
-        place(hwnd, SET_WATCH, x0, foot + ctl_h + gap, field_w, ctl_h);
-        place(hwnd, SET_WATCH_RESET, x0 + field_w + gap, foot + ctl_h + gap, field_w, ctl_h);
+        // They used to be wrapped onto a second row, on the reasoning that four
+        // 150-wide fields with a gap each is 630 against a 470-wide column at
+        // the narrowest window. That was wrong twice over: only one pair is
+        // shown at a time, so it is two fields — 310 — that have to fit, and a
+        // second row of them starts below the client area, which is what left
+        // the Stopwatch buttons hanging 14 pixels off the bottom of the window
+        // with no way to see or click the lower half of either.
+        for (id, column) in [
+            (SET_SPEED, 0),
+            (SET_STOP, 1),
+            (SET_WATCH, 0),
+            (SET_WATCH_RESET, 1),
+        ] {
+            let (cx, cy, cw, ch) = foot_slot(column, x0, field_w, gap, foot, ctl_h);
+            place(hwnd, id, cx, cy, cw, ch);
+        }
         // A second run while one is in flight is refused by `SpeedTest::start`
         // anyway; disabling it here is what says so before the click rather
         // than after it. Refreshed per tick by `ui::update`, because the run
@@ -747,6 +756,26 @@ pub(crate) fn form_top(dpi: u32) -> i32 {
 /// where the page ends.
 pub(crate) fn foot_button_top(h: i32, dpi: u32) -> i32 {
     (h - scale(PAD, dpi) - scale(CTL_H, dpi)).max(form_top(dpi))
+}
+
+/// One page-owned button's rectangle on the foot row: two columns, one row.
+///
+/// Pure, and separate from the `place` call that consumes it, so the question
+/// "does that row fit in the window" can be asked without a window to ask it
+/// of. It is the question that was not being asked: the pair was wrapped onto a
+/// second row, and a second row at the foot of a window that is already using
+/// its last band starts *below the client area*. Both buttons were drawn 14
+/// pixels off the bottom edge, and `place` reports nothing — a child window
+/// positioned past its parent's edge is not an error to Windows.
+pub(crate) fn foot_slot(
+    column: usize,
+    x0: i32,
+    field_w: i32,
+    gap: i32,
+    foot: i32,
+    ctl_h: i32,
+) -> (i32, i32, i32, i32) {
+    (x0 + (field_w + gap) * column as i32, foot, field_w, ctl_h)
 }
 
 /// Every control the dashboard owns, in creation order.
