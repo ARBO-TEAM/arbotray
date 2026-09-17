@@ -1713,6 +1713,23 @@ mod tests {
     }
 
     #[test]
+    fn a_caption_drops_to_meet_the_control_beside_it() {
+        // Measured on the running page: a native control centres its own text
+        // while a row draws from the top of its band, which left every label
+        // on the form five pixels above the value next to it.
+        assert!(FIELD_DROP > 0, "a field row has to drop to meet its control");
+        assert_eq!(FIELD_DROP, 5, "re-measure if the control font or CTL_H moved");
+        // Every band that carries a control drops, and only those: the divider
+        // claims a band of its own, and moving its caption would slide the rule
+        // off the band it was given.
+        for (id, row) in FIELD_ROWS {
+            assert_eq!(field_drop(row, 96), FIELD_DROP, "control {id} on row {row}");
+        }
+        assert_eq!(field_drop(ROW_DIVIDER, 96), 0, "the rule must not move");
+        assert_eq!(field_drop(ROW_REFRESH, 96), FIELD_DROP, "row 5 has a field");
+    }
+
+    #[test]
     fn scaled_metrics_never_collapse_to_nothing() {
         assert_eq!(scale(SIDEBAR_W, 96), SIDEBAR_W);
         assert_eq!(scale(SIDEBAR_W, 144), 225);

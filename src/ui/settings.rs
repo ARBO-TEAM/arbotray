@@ -547,6 +547,25 @@ pub(crate) fn right_hand_control(id: i32) -> bool {
     matches!(id, SET_RESET | SET_QUOTA)
 }
 
+/// How far a caption drops so it shares the centre line of the field beside it.
+///
+/// Measured against the controls on the running page rather than derived: a
+/// native control centres its own text in its rectangle using its own font
+/// metrics, while a row draws from the top of its band. Five pixels is what
+/// that came to on every row of the real page — re-measure after a change to
+/// the control font or to `CTL_H`.
+pub(crate) const FIELD_DROP: i32 = 5;
+
+/// The drop for `row`, and zero on the bands that carry no control — the
+/// divider claims one, and moving it would slide the rule off its own band.
+pub(crate) fn field_drop(row: usize, dpi: u32) -> i32 {
+    if FIELD_ROWS.iter().any(|(_, r)| *r == row) {
+        scale(FIELD_DROP, dpi)
+    } else {
+        0
+    }
+}
+
 /// Whether a control is one of the colour fields' Pick buttons, which take a
 /// word's width rather than a field's. Kept apart from `right_hand_control`
 /// because the two answer different questions — that one says *which side of

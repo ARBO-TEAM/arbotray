@@ -13,7 +13,7 @@ use crate::ui::pages::{
     DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, page_rows, page_section,
     page_shows_graph, usage_rows,
 };
-use crate::ui::settings::{ROW_DIVIDER, SET_ROW_LABELS, foot_button_top};
+use crate::ui::settings::{ROW_DIVIDER, SET_ROW_LABELS, field_drop, foot_button_top};
 use crate::ui::theme::scale;
 use crate::ui::{
     CLOCK_EXTRA, PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState,
@@ -346,7 +346,13 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                     // drawn behind their controls.
                     c.space(row_h);
                 } else {
-                    c.row(label, "");
+                    // The caption drops to the middle of the field beside it:
+                    // a native field centres its own text while a row draws
+                    // from the top of its band, and at this one place on the
+                    // page a caption sits *beside* a control rather than above
+                    // it, leaving the two five pixels apart — enough for the
+                    // label to read as a heading for the row above it.
+                    c.row_aligned(label, "", field_drop(row, state.dpi));
                 }
             }
             // The notice sits under the buttons rather than beside them: it is

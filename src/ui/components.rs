@@ -379,6 +379,18 @@ impl<'a> Canvas<'a> {
     /// edge either way, so the values column of a page is a single line down it
     /// regardless of how the labels are indented.
     pub(crate) fn row(&mut self, label: &str, value: &str) {
+        self.row_aligned(label, value, 0);
+    }
+
+    /// A row whose text drops by `dy` before it is drawn.
+    ///
+    /// For the one place on the page where a caption sits *beside* a native
+    /// control instead of above one. A control centres its own text in its
+    /// rectangle; a row draws from the top of its band; the two then disagree
+    /// by a few pixels — enough that the caption reads as a heading for the row
+    /// above it. `dy` is measured against the real control rather than derived,
+    /// because how a control centres its text is the control's own business.
+    pub(crate) fn row_aligned(&mut self, label: &str, value: &str, dy: i32) {
         // SAFETY: a live DC and fonts owned by the caller's frame.
         unsafe {
             SetTextColor(self.dc, self.text_colour());
@@ -387,7 +399,7 @@ impl<'a> Canvas<'a> {
                 self.fonts.body,
                 label,
                 self.label_x(),
-                self.y + self.nudge,
+                self.y + self.nudge + dy,
                 self.x1,
                 DT_LEFT,
             );
@@ -399,7 +411,7 @@ impl<'a> Canvas<'a> {
                 self.fonts.bold,
                 value,
                 self.x0,
-                self.y + self.nudge,
+                self.y + self.nudge + dy,
                 self.x1,
                 DT_RIGHT | DT_END_ELLIPSIS,
             );
