@@ -1,4 +1,6 @@
 /target
 *.json.bad
+/.claude-flow
+/.opencode
 # Scratch screenshots taken while checking the window by hand.
 /.shots
