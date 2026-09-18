@@ -5,6 +5,7 @@
 //! message can reach the receiver and renderer without a global.
 
 use crate::config::Config;
+use crate::taskbar::alert::Alerts;
 use crate::taskbar::icon::{self, CMD_OPEN, CMD_QUIT, Icon, show_menu};
 use crate::taskbar::render::Renderer;
 use crate::taskbar::{TrayModel, dock};
@@ -55,6 +56,10 @@ pub struct WindowState {
     /// own: it is repainted from the same model, in the same arm of the same
     /// message.
     pub widget: Option<crate::widget::Widget>,
+    /// Decides which samples earn a balloon notification. Held across ticks
+    /// because the rules are all about what already happened — a fresh value
+    /// each sample would announce the same 90% once a second.
+    pub alerts: Alerts,
 }
 
 /// Window procedure for the docked tray child.
@@ -110,6 +115,14 @@ pub unsafe extern "system" fn wnd_proc(
                 }
                 if let Some(icon) = &mut state.icon {
                     icon.set_tip(&state.model.tooltip());
+                    if let Some(b) = state.alerts.poll(
+                        &state.cfg.notify,
+                        state.model.quota_pct,
+                        state.model.rx_bps,
+                        std::time::Instant::now(),
+                    ) {
+                        icon.balloon(&b);
+                    }
                 }
                 // The dashboard is fed here rather than from the telemetry
                 // thread: same thread as the window, so no queue is needed.

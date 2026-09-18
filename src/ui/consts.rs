@@ -101,6 +101,15 @@ pub(crate) const SET_PICK_ALERT: i32 = SET_ID_BASE + 26;
 /// wrong.
 pub(crate) const SET_THEME: i32 = SET_ID_BASE + 32;
 
+/// Notification Settings controls.
+///
+/// Three controls: a master-enable checkbox, a plan-threshold field, and a
+/// rate field. They sit on three consecutive rows of the Preferences card and
+/// are hidden/shown with the rest of the Settings page controls.
+pub(crate) const SET_NOTIFY_ON: i32 = SET_ID_BASE + 34;
+pub(crate) const SET_NOTIFY_QUOTA: i32 = SET_ID_BASE + 35;
+pub(crate) const SET_NOTIFY_RATE: i32 = SET_ID_BASE + 36;
+
 /// The header's Reset to Default button. A page-wide action, not a field, so
 /// its own id: it acts on the whole form rather than being laid out with it.
 pub(crate) const SET_DEFAULTS: i32 = SET_ID_BASE + 33;

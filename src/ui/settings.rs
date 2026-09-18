@@ -8,6 +8,7 @@ use crate::ui::consts::{
     CTL_H, CTL_NUDGE, FIELD_W, PICK_W, SET_ALERT, SET_AUTOSTART, SET_BG,
     SET_DEFAULTS, SET_FG, SET_FONT, SET_INTERVAL, SET_OPACITY, SET_PICK_ALERT, SET_PICK_BG,
     SET_PICK_FG, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_THEME,
+    SET_NOTIFY_ON, SET_NOTIFY_QUOTA, SET_NOTIFY_RATE,
     SET_TIMER_ACTION, SET_TIMER_ARM, SET_TIMER_AT, SET_TIMER_MODE, SET_TIMER_WAIT, SET_WATCH,
     SET_WATCH_RESET, SET_WIDGET, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
@@ -54,6 +55,13 @@ pub(crate) struct SettingsForm {
     /// tray's thread and this window cannot reach it — the save hands the
     /// config over instead, exactly as a theme edit does.
     pub(crate) widget: bool,
+    /// Notification master switch.
+    pub(crate) notify_on: bool,
+    /// Plan threshold (0 – 100). Raw integer so a mid-edit blank does not
+    /// become 0 and suppress the alert.
+    pub(crate) notify_quota: i32,
+    /// Rate alert in MB/s. `0.0` or non-finite → off.
+    pub(crate) notify_rate: f64,
 }
 
 impl SettingsForm {
@@ -87,6 +95,9 @@ impl SettingsForm {
             alert: cfg.theme.alert.clone(),
             opacity: cfg.theme.opacity as i32,
             widget: cfg.widget.enabled,
+            notify_on: cfg.notify.enabled,
+            notify_quota: cfg.notify.quota_pct as i32,
+            notify_rate: cfg.notify.rate_mbps,
         }
     }
 
@@ -113,6 +124,16 @@ impl SettingsForm {
         cfg.theme.alert = self.alert.trim().to_string();
         cfg.theme.opacity = self.opacity.clamp(0, 255) as u8;
         cfg.widget.enabled = self.widget;
+        cfg.notify.enabled = self.notify_on;
+        // Clamped rather than refused, like the refresh period: these are
+        // bounds on a trigger, not preferences with a right answer. A `0` stays
+        // reachable because it is the documented "off" value for both.
+        cfg.notify.quota_pct = self.notify_quota.clamp(0, 100) as u32;
+        cfg.notify.rate_mbps = if self.notify_rate.is_finite() && self.notify_rate > 0.0 {
+            self.notify_rate
+        } else {
+            0.0
+        };
         Ok(cfg)
     }
 }
@@ -196,6 +217,12 @@ pub(crate) fn read_form(hwnd: HWND, checks: &Checks) -> SettingsForm {
         alert: text_of(hwnd, SET_ALERT).unwrap_or_default(),
         opacity: parse_int(text_of(hwnd, SET_OPACITY).as_deref()).unwrap_or(-1),
         widget: checks.get(SET_WIDGET),
+        notify_on: checks.get(SET_NOTIFY_ON),
+        // A blank field is read as `-1`, which `into_config` clamps back to 0 —
+        // the documented off value. That is the right landing for a field
+        // somebody is mid-edit in: quiet, not a threshold they never typed.
+        notify_quota: parse_int(text_of(hwnd, SET_NOTIFY_QUOTA).as_deref()).unwrap_or(-1),
+        notify_rate: parse_f64(text_of(hwnd, SET_NOTIFY_RATE).as_deref()).unwrap_or(0.0),
     }
 }
 
@@ -260,7 +287,8 @@ impl Checks {
 /// predicate that only knew the grid would draw two of the page's checkboxes as
 /// push buttons.
 pub(crate) fn is_checkbox(id: i32) -> bool {
-    TILE_IDS.contains(&id) || matches!(id, SET_QUOTA_ON | SET_AUTOSTART | SET_WIDGET)
+    TILE_IDS.contains(&id)
+        || matches!(id, SET_QUOTA_ON | SET_AUTOSTART | SET_WIDGET | SET_NOTIFY_ON)
 }
 
 /// The edit fields — the controls that need a well painted behind them.
@@ -270,7 +298,7 @@ pub(crate) fn is_checkbox(id: i32) -> bool {
 /// the list `paint` walks to find them. The Timer page's two are here as well as
 /// the Settings page's seven, because the treatment belongs to the *control* and
 /// not to the page it happens to sit on.
-pub(crate) const EDIT_IDS: [i32; 9] = [
+pub(crate) const EDIT_IDS: [i32; 11] = [
     SET_BG,
     SET_FG,
     SET_ALERT,
@@ -280,6 +308,8 @@ pub(crate) const EDIT_IDS: [i32; 9] = [
     SET_OPACITY,
     SET_TIMER_AT,
     SET_TIMER_WAIT,
+    SET_NOTIFY_QUOTA,
+    SET_NOTIFY_RATE,
 ];
 
 /// Push a config into the live controls. Used to load the page and to undo a
@@ -302,8 +332,15 @@ pub(crate) fn write_form(hwnd: HWND, checks: &Checks, cfg: &Config) {
     // consults — see `crate::autostart`.
     checks.set(SET_AUTOSTART, crate::autostart::enabled());
     checks.set(SET_WIDGET, form.widget);
+    checks.set(SET_NOTIFY_ON, form.notify_on);
+    set_text(hwnd, SET_NOTIFY_QUOTA, &form.notify_quota.to_string());
+    set_text(hwnd, SET_NOTIFY_RATE, &format_quota(form.notify_rate));
     // The quota field is only meaningful while its switch is on.
     set_enabled(hwnd, SET_QUOTA, form.quota_on);
+    // Both thresholds are dead while notifications are off, so the page says so
+    // rather than leaving two live-looking fields that change nothing.
+    set_enabled(hwnd, SET_NOTIFY_QUOTA, form.notify_on);
+    set_enabled(hwnd, SET_NOTIFY_RATE, form.notify_on);
     // Last, and from the Background field just written above rather than from
     // the form: the button says which way the *page* goes, so the box beside it
     // is the only thing that can answer.
@@ -538,6 +575,11 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     // print the setting twice.
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_AUTOSTART);
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_WIDGET);
+    create_control(parent, state, w!("BUTTON"), "", check_style, SET_NOTIFY_ON);
+    // The plan threshold is a whole percentage, so `ES_NUMBER`; the rate is a
+    // decimal like the plan's GB figure beside it, so it is not.
+    create_control(parent, state, w!("EDIT"), "", num_style, SET_NOTIFY_QUOTA);
+    create_control(parent, state, w!("EDIT"), "", edit_style, SET_NOTIFY_RATE);
     // Owner-drawn too, and the same style as the checkboxes: `WM_DRAWITEM` is
     // the only way to get a push button off the system's parts, which is why
     // Save and Reload kept their native look while the boxes did not.
@@ -671,11 +713,17 @@ pub(crate) const ROW_ALERT: usize = 5;
 pub(crate) const ROW_OPACITY: usize = 6;
 pub(crate) const ROW_STARTUP: usize = 7;
 pub(crate) const ROW_WIDGET: usize = 8;
+/// The three notification rows, together and directly under the plan-adjacent
+/// settings they depend on: the plan threshold is meaningless without a plan,
+/// and putting them apart would leave a user setting a percentage of nothing.
+pub(crate) const ROW_NOTIFY: usize = 9;
+pub(crate) const ROW_NOTIFY_QUOTA: usize = 10;
+pub(crate) const ROW_NOTIFY_RATE: usize = 11;
 /// The dark/light button, above the two colours it writes rather than beside
 /// them: it is a way to *type into* the Background and Foreground fields, and a
 /// row under them is where a user looks after reading the two hex strings.
-pub(crate) const ROW_APPEARANCE: usize = 9;
-pub(crate) const ROW_SAVE: usize = 10;
+pub(crate) const ROW_APPEARANCE: usize = 12;
+pub(crate) const ROW_SAVE: usize = 13;
 /// The rows the second card's body holds. Its height is the card head plus this
 /// many bands — see `prefs_card_h`.
 pub(crate) const FORM_ROWS: usize = ROW_SAVE + 1;
@@ -700,6 +748,9 @@ pub(crate) const SET_ROW_LABELS: [&str; FORM_ROWS] = [
     "Opacity   0-255",
     "Start with Windows",
     "Desktop widget",
+    "Notifications",
+    "Warn at plan   %",
+    "Warn at rate   MB/s",
     "Appearance",
     "Write config.json",
 ];
@@ -734,7 +785,7 @@ pub(crate) const TIMER_FIELD_ROWS: [(i32, usize); 4] = [
 
 /// Which row each non-tile control belongs on. One table drives both the layout
 /// and the captions, so a control cannot end up under the wrong line.
-pub(crate) const FIELD_ROWS: [(i32, usize); 16] = [
+pub(crate) const FIELD_ROWS: [(i32, usize); 19] = [
     (SET_INTERVAL, ROW_REFRESH),
     (SET_QUOTA_ON, ROW_PLAN),
     (SET_QUOTA, ROW_PLAN),
@@ -745,6 +796,9 @@ pub(crate) const FIELD_ROWS: [(i32, usize); 16] = [
     (SET_OPACITY, ROW_OPACITY),
     (SET_AUTOSTART, ROW_STARTUP),
     (SET_WIDGET, ROW_WIDGET),
+    (SET_NOTIFY_ON, ROW_NOTIFY),
+    (SET_NOTIFY_QUOTA, ROW_NOTIFY_QUOTA),
+    (SET_NOTIFY_RATE, ROW_NOTIFY_RATE),
     (SET_THEME, ROW_APPEARANCE),
     (SET_SAVE, ROW_SAVE),
     (SET_RESET, ROW_SAVE),

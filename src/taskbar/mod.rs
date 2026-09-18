@@ -6,6 +6,7 @@
 //! taskbar and with it our child window — see the `TaskbarCreated` arm in
 //! `events` for why that currently ends the process instead of re-attaching.
 
+pub mod alert;
 pub mod dock;
 pub mod events;
 pub mod icon;
@@ -58,6 +59,19 @@ pub struct TrayModel {
     /// Today's total is over the configured plan. Drives a colour swap, since
     /// text in the taskbar has no room for an icon.
     pub quota_alert: bool,
+    /// Share of the configured plan the month has used, or `None` when there
+    /// is no plan. The *number*, not the rendered percentage: the notification
+    /// rules compare it against a threshold, and a string would have to be
+    /// parsed back. `None` and `Some(0.0)` are different — see
+    /// `alert::Alerts::poll`.
+    pub quota_pct: Option<f32>,
+    /// The incoming rate this sample, in bytes per second.
+    ///
+    /// Carried beside `down_text` rather than parsed back out of it, because
+    /// `down_text` is *empty* when the Download tile is switched off — and a
+    /// rate alert that stopped working because a tile was unticked would be a
+    /// silent failure with no visible cause.
+    pub rx_bps: u64,
     /// Traffic over the current month, e.g. `41.2G`. Page detail: the strip
     /// shows today, and today alone cannot answer "is this month unusual?".
     pub month_text: String,
@@ -198,6 +212,9 @@ impl TrayModel {
         };
 
         if let Some(n) = &m.net {
+            // Unconditional: the rate alert reads this, and it must not depend
+            // on whether the tile that happens to print the same number is on.
+            out.rx_bps = n.rx_bps;
             if cfg.show.net_down {
                 out.down_text = format_rate(n.rx_bps);
             }

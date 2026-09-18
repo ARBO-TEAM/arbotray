@@ -4,11 +4,12 @@
 //! button of its own, so this icon is the *only* way to quit the app. That
 //! makes it load-bearing rather than cosmetic.
 
+use crate::taskbar::alert::{Balloon, Level};
 use crate::taskbar::dock::AttachResult;
 use windows::Win32::Foundation::{HINSTANCE, HWND, POINT};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, HICON,
@@ -101,6 +102,40 @@ impl Icon {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data);
         }
         self.data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    }
+
+    /// Put a balloon in front of the user.
+    ///
+    /// `NIF_INFO` is a *modify*, not an add: the icon already exists, and this
+    /// borrows it for one notification. Only `NIF_INFO` is claimed in `uFlags`
+    /// for the call, so this cannot disturb the tooltip, the icon or the
+    /// callback message — the same discipline `set_tip` keeps.
+    ///
+    /// The fields are written and then **cleared again**. `szInfo` is part of
+    /// the same struct every later `NIM_MODIFY` sends, so a body left in place
+    /// would be re-shown by the next `set_tip` if the flag were ever set with
+    /// it: clearing is what makes "one balloon" mean one.
+    ///
+    /// Whether the balloon is actually drawn is the shell's decision, not
+    /// ours — Focus Assist, a full-screen app and the per-app notification
+    /// switch all suppress it. That is the correct behaviour and the reason
+    /// nothing here treats a refusal as an error: the user's Do Not Disturb
+    /// outranks our threshold.
+    pub fn balloon(&mut self, balloon: &Balloon) {
+        write_tip(&mut self.data.szInfoTitle, &balloon.title);
+        write_tip(&mut self.data.szInfo, &balloon.body);
+        self.data.dwInfoFlags = match balloon.level {
+            Level::Info => NIIF_INFO,
+            Level::Warning => NIIF_WARNING,
+        };
+        self.data.uFlags = NIF_INFO;
+        // SAFETY: `data` is the same live struct that was added.
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data);
+        }
+        self.data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        self.data.szInfo.fill(0);
+        self.data.szInfoTitle.fill(0);
     }
 }
 

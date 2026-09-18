@@ -159,6 +159,7 @@ impl Tray {
                 // because `create` needs the window's own `HINSTANCE`, which is
                 // the same module handle but reads better named once.
                 widget: None,
+                alerts: crate::taskbar::alert::Alerts::new(),
             });
 
             // Reserve width from a worst-case sample so changing digits never

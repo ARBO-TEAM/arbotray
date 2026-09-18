@@ -123,12 +123,15 @@ fn telemetry_loop(notifier: crate::taskbar::Notifier, speed: SpeedTest) {
         usage.flush_if_due();
 
         let mut model = TrayModel::from_metric(&metric, &cfg);
+        let qpct = usage.quota_pct(cfg.quota_gb);
         if cfg.show.usage {
             model.usage_text = usage.text();
-            model.quota_alert = usage
-                .quota_pct(cfg.quota_gb)
-                .is_some_and(|pct| pct >= 100.0);
+            model.quota_alert = qpct.is_some_and(|pct| pct >= 100.0);
         }
+        // Always set, not gated on `show.usage`: the notification engine reads
+        // it, and silencing alerts because a tile is switched off would be a
+        // silent failure with no visible cause.
+        model.quota_pct = qpct;
         // Not gated on `show.usage`: like the gateway and adapter rows these
         // are Data-page detail with no tile of their own, absent from
         // `render::visible_segments`, so they cannot widen the strip.

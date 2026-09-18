@@ -650,6 +650,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         // editable would suggest it does.
                         set_enabled(hwnd, SET_QUOTA, s.checks.get(SET_QUOTA_ON));
                         s.notice = None;
+                    } else if id == SET_NOTIFY_ON {
+                        let on = s.checks.get(SET_NOTIFY_ON);
+                        set_enabled(hwnd, SET_NOTIFY_QUOTA, on);
+                        set_enabled(hwnd, SET_NOTIFY_RATE, on);
+                        s.notice = None;
                     } else if id == SET_AUTOSTART {
                         // Written on the click rather than staged for Save,
                         // because it is the one control on the page that does
@@ -1545,6 +1550,8 @@ mod tests {
             // The build line, filled so the System page's row ordering is
             // exercised with its last row present rather than absent.
             version_text: "0.7.1 \u{2192} 0.8.0".into(),
+            quota_pct: Some(42.0),
+            rx_bps: 1_000_000,
         }
     }
 

@@ -36,6 +36,11 @@ pub const DEFAULT_JSON: &str = r##"{
     "days": 7
   },
   "quota_gb": 0.0,
+  "notify": {
+    "enabled": true,
+    "quota_pct": 90,
+    "rate_mbps": 0.0
+  },
   "widget": {
     "enabled": false,
     "show": {
@@ -72,6 +77,8 @@ pub struct Config {
     /// Monthly data allowance in GB. `0` means "no plan", which hides the
     /// percentage and the warning colour entirely.
     pub quota_gb: f64,
+    /// Balloon notifications from the tray icon.
+    pub notify: Notify,
     /// The desktop widget — the floating panel for the readings the taskbar
     /// strip has no room for. Off by default: this is the one thing the app
     /// draws that is not inside a surface Windows already owns, so it is opted
@@ -80,6 +87,42 @@ pub struct Config {
     /// The sleep / shut-down timer. Off by default, and *disarmed* by default
     /// even once configured — see [`Timer`].
     pub timer: Timer,
+}
+
+/// Settings for the tray balloon notification system.
+///
+/// Two independent gates: the data plan (announced once per threshold
+/// crossing per month) and the download rate (announced on a rising edge,
+/// then silenced for [`crate::taskbar::alert::RATE_COOLDOWN`]).
+///
+/// Both are in `config.json` so a user who never wants a notification can
+/// turn the whole thing off in one edit, and a user who only wants plan alerts
+/// can silence the rate side by setting `rate_mbps` to `0`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notify {
+    /// Master switch. `false` suppresses every balloon from this app.
+    pub enabled: bool,
+    /// Fire when the monthly total exceeds this share of the configured plan,
+    /// as a whole percentage. `0` means "no rate threshold" — *not*
+    /// "alert on the first byte".
+    pub quota_pct: u32,
+    /// Fire when the incoming rate exceeds this many MiB/s. `0.0` or any
+    /// non-positive, non-finite value disables the rate alert entirely.
+    pub rate_mbps: f64,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            quota_pct: 90,
+            // Off by default: a rate threshold that surprised nobody on install
+            // is a threshold nobody configured, and a balloon the user did not
+            // ask for is the fastest way to uninstall a tray app.
+            rate_mbps: 0.0,
+        }
+    }
 }
 
 /// The sleep / shut-down timer's settings.
@@ -313,6 +356,7 @@ impl Default for Config {
             theme: Theme::default(),
             retention: Retention::default(),
             quota_gb: 0.0,
+            notify: Notify::default(),
             widget: Widget::default(),
             timer: Timer::default(),
         }
