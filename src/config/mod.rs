@@ -33,7 +33,7 @@ pub const DEFAULT_JSON: &str = r##"{
     "opacity": 0
   },
   "retention": {
-    "days": 7
+    "days": 31
   },
   "quota_gb": 0.0,
   "notify": {
@@ -295,8 +295,17 @@ pub struct Theme {
 pub struct Retention {
     /// Days of usage history in `usage.json`. Bounded to at least one — a
     /// window of zero would erase today's total as it was written.
+    ///
+    /// The default is a whole month rather than a week, because the quota is
+    /// monthly: a shorter window makes `Usage::month_bytes` a sum of the days
+    /// that happen to be left, which reads *low* against the plan. A week-long
+    /// window would under-report the quota by roughly three quarters in the
+    /// last week of the month, which is precisely when it matters most.
     pub days: u32,
 }
+
+/// The retention default before v0.11.0. Only `Config::migrate` reads it.
+const OLD_DEFAULT_KEEP_DAYS: u32 = 7;
 
 // --- bounds ---------------------------------------------------------------
 
@@ -392,7 +401,10 @@ impl Default for Theme {
 
 impl Default for Retention {
     fn default() -> Self {
-        Self { days: 7 }
+        // A month, so the monthly quota can actually be measured. The cost is
+        // nothing worth counting: a day's record is two integers and a date,
+        // about 56 bytes, so a full window is under 2 KB of JSON.
+        Self { days: 31 }
     }
 }
 
@@ -413,13 +425,39 @@ impl Config {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        match serde_json::from_str(&text) {
-            Ok(cfg) => cfg,
+        match serde_json::from_str::<Self>(&text) {
+            Ok(mut cfg) => {
+                cfg.migrate();
+                cfg
+            }
             Err(_) => {
                 // Keep the bad file for inspection, start clean.
                 let _ = std::fs::rename(&path, path.with_extension("json.bad"));
                 Self::default()
             }
+        }
+    }
+
+    /// Fix up a config written by an older version.
+    ///
+    /// Kept separate from `load` so it can be tested without a file, and kept
+    /// deliberately small: a migration list that grows without bound is how a
+    /// config format becomes impossible to change.
+    fn migrate(&mut self) {
+        // Retention was 7 days until v0.11.0, chosen when the Data page's
+        // seven-row breakdown was the only thing reading it. The monthly quota
+        // now reads it too, and a week-long window makes `month_bytes` a sum of
+        // whatever days are left — under-reporting the plan by roughly three
+        // quarters in the last week of the month, which is when the number
+        // matters most.
+        //
+        // Overwriting a stored value is normally wrong, but `days` has no
+        // Settings row and never had one: every 7 on disk is the old default
+        // rather than somebody's choice. The cost of being wrong about that is
+        // under 2 KB of JSON; the cost of leaving it is a quota readout that is
+        // silently low on every machine upgraded rather than freshly installed.
+        if self.retention.days == OLD_DEFAULT_KEEP_DAYS {
+            self.retention.days = Retention::default().days;
         }
     }
 
@@ -546,5 +584,52 @@ mod tests {
         assert!(Config::default().save_to(&path).is_err());
 
         let _ = std::fs::remove_file(&file);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn the_old_seven_day_window_is_widened_to_a_month() {
+        // A config written by v0.10.0 or earlier. Left alone, its week-long
+        // window would make the monthly quota read low on every upgraded
+        // machine — and silently, because the number still looks plausible.
+        let mut old = Config {
+            retention: Retention { days: 7 },
+            ..Config::default()
+        };
+        old.migrate();
+        assert_eq!(
+            old.retention.days, 31,
+            "an upgraded machine must be able to see a whole month"
+        );
+    }
+
+    #[test]
+    fn a_window_the_user_chose_is_left_alone() {
+        // Only the exact old default is touched. Anything else was either
+        // hand-edited or written by a future version, and overwriting it would
+        // be the migration deciding it knows better.
+        for days in [1, 14, 90, 365] {
+            let mut cfg = Config {
+                retention: Retention { days },
+                ..Config::default()
+            };
+            cfg.migrate();
+            assert_eq!(cfg.retention.days, days, "{days} was not the old default");
+        }
+    }
+
+    #[test]
+    fn the_month_sum_survives_a_full_default_window() {
+        // The retention default has to be at least as long as the longest
+        // month, or `month_bytes` starts dropping days off the front of a month
+        // still in progress — the exact failure the migration exists to stop.
+        assert!(
+            Retention::default().days >= 31,
+            "a 31-day month must fit inside the default window"
+        );
     }
 }

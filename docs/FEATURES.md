@@ -6,7 +6,7 @@ All features are available to every user — there is no free tier, no premium t
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
 
-Tree today: 18,653 lines of Rust across `src/`, **264 tests passing, 2 ignored**.
+Tree today: 19,557 lines of Rust across `src/`, **267 tests passing, 2 ignored**.
 
 ## Summary
 
@@ -140,6 +140,8 @@ The hardest item, and still the hardest. Per-PID *identification* now exists ins
 **Explorer-restart supervisor — fixed in v0.11.0.** The previous audits recorded this as the one outright correctness bug, and the diagnosis in the code was wrong in an instructive way. The `TaskbarCreated` arm in `events.rs` was dead code: that broadcast only reaches *top-level* windows, and the tray strip is a `WS_CHILD` of `Shell_TrayWnd`. What actually happens is that the parent dies and takes the child with it, so the real signal is `WM_DESTROY`. `app::run` now loops around `message_loop()` and rebuilds, distinguishing a user Quit from a restart by an `AtomicBool` the menu sets. The telemetry thread deliberately *survives* the rebuild and is re-pointed at the new window through a `NotifierCell`, because the byte counters are cumulative and a fresh `Sampler` would report the whole month as one spike.
 
 **Quota measured against the wrong window — fixed in v0.11.0.** `quota_pct` divided `total_bytes()` (today) by `quota_gb` (a *monthly* allowance), so every reading was roughly thirty times too low. On the author machine a plan that was 65% spent displayed as 35%, the over-plan colour could not fire until one single day exceeded the whole month, and the new 90% balloon threshold was effectively unreachable. It now divides `month_bytes()`. The old tests missed it because every fixture held one day, where the two totals are identical.
+
+**Retention default widened to 31 days (v0.11.0).** The same bug by another route: the window was seven days, chosen when the Data page's seven-row breakdown was the only reader. Once the quota started reading `month_bytes` a week-long window under-reported the plan by roughly three quarters in the last week of the month. `Config::migrate` rewrites the old default in place — sound only because `retention.days` has no Settings row and never had one, so every 7 on disk is the old default rather than a choice. A full month of records is under 2 KB of JSON.
 
 ## Suggested next
 
