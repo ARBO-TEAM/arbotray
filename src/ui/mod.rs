@@ -1878,9 +1878,28 @@ mod tests {
 
     #[test]
     fn only_the_traffic_pages_draw_the_graph() {
-        assert!(page_shows_graph(OVERVIEW));
+        // The Overview draws its chart *inside its own card* now, from the
+        // painter rather than from the window's remainder, so it is no longer
+        // one of the pages that fills what is left.
+        assert!(!page_shows_graph(OVERVIEW), "the overview's chart is in a card");
         assert!(!page_shows_graph(NETWORK));
         assert!(!page_shows_graph(SYSTEM));
+    }
+
+    /// The meters read a percentage out of a model string, and a string that is
+    /// not one has to become an empty bar rather than a panic or a full one.
+    #[test]
+    fn a_percentage_parses_or_reads_as_nothing() {
+        assert!((pct_of("41%") - 0.41).abs() < 1e-6);
+        assert!((pct_of(" 100% ") - 1.0).abs() < 1e-6);
+        // A time, a speed and an empty string are all "no reading", not zero
+        // percent and not a full bar.
+        assert_eq!(pct_of(""), 0.0);
+        assert_eq!(pct_of("n/a"), 0.0);
+        assert_eq!(pct_of("--"), 0.0);
+        // Past the end is the end: a model that reported 140% would otherwise
+        // draw a bar out through the card's own edge.
+        assert_eq!(pct_of("140%"), 1.0);
     }
 
     #[test]
