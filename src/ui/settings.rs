@@ -3,14 +3,15 @@
 use crate::config::{
     Config, QUOTA_MAX_GB, QUOTA_MIN_GB, clamp_font_size, clamp_interval_ms, clamp_quota_gb,
 };
+use crate::ui::components::{card_h, head_h};
 use crate::ui::consts::{
-    BST_CHECKED, CTL_H, CTL_NUDGE, FIELD_W, PICK_W, SET_ALERT, SET_AUTOSTART, SET_BG, SET_FG,
-    SET_FONT, SET_INTERVAL, SET_OPACITY, SET_PICK_ALERT, SET_PICK_BG, SET_PICK_FG, SET_QUOTA,
-    SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_THEME, SET_TIMER_ACTION,
-    SET_TIMER_ARM, SET_TIMER_AT, SET_TIMER_MODE, SET_TIMER_WAIT, SET_WATCH, SET_WATCH_RESET,
-    SET_WIDGET, TILE_IDS,
-    TILE_LABELS, WM_ENABLE,
+    CTL_H, CTL_NUDGE, FIELD_W, PICK_W, SET_ALERT, SET_AUTOSTART, SET_BG,
+    SET_DEFAULTS, SET_FG, SET_FONT, SET_INTERVAL, SET_OPACITY, SET_PICK_ALERT, SET_PICK_BG,
+    SET_PICK_FG, SET_QUOTA, SET_QUOTA_ON, SET_RESET, SET_SAVE, SET_SPEED, SET_STOP, SET_THEME,
+    SET_TIMER_ACTION, SET_TIMER_ARM, SET_TIMER_AT, SET_TIMER_MODE, SET_TIMER_WAIT, SET_WATCH,
+    SET_WATCH_RESET, SET_WIDGET, TILE_IDS, TILE_LABELS, WM_ENABLE,
 };
+use crate::ui::design::{CARD_PAD, CHIP, LANE_GAP};
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, layout, rebuild_fonts};
 use crate::power;
 use crate::ui::low_word;
@@ -20,12 +21,13 @@ use crate::ui::UiState;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CreateWindowExW, ES_AUTOHSCROLL,
+    BS_OWNERDRAW, CreateWindowExW, ES_AUTOHSCROLL,
     ES_NUMBER, GetClientRect, GetDlgItem, GetWindowTextLengthW, GetWindowTextW, HMENU, SW_HIDE,
     SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageW, SetWindowPos, SetWindowTextW, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETFONT, WS_BORDER, WS_CHILD, WS_TABSTOP,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETFONT, WS_CHILD, WS_TABSTOP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
+use std::cell::RefCell;
 
 /// Everything the Settings page knows, in the form it knows it: text exactly as
 /// typed, and integers parsed with a running fallback.
@@ -174,50 +176,121 @@ pub(crate) fn validate_quota_on(on: bool, gb: f64) -> Result<Option<f64>, String
 
 /// What the user left on the Settings page, read back out of the live controls.
 ///
-/// This is the one piece of window state that is not in `UiState`: the values
-/// live in native controls, which keep their own state and would lose it if
-/// this were mirrored on every `WM_COMMAND`. It is only ever built while the
-/// window exists, from an `hwnd` that has already been checked.
-pub(crate) fn read_form(hwnd: HWND) -> SettingsForm {
+/// The text fields keep their own state in the native controls and would lose it
+/// if this were mirrored on every `WM_COMMAND`; the checkboxes cannot, because
+/// they are owner-drawn and the system keeps nothing for them — `checks` is
+/// where their state lives. It is only ever built while the window exists, from
+/// an `hwnd` that has already been checked.
+pub(crate) fn read_form(hwnd: HWND, checks: &Checks) -> SettingsForm {
     SettingsForm {
-        tiles: std::array::from_fn(|i| is_checked(hwnd, TILE_IDS[i])),
+        tiles: std::array::from_fn(|i| checks.get(TILE_IDS[i])),
         // An unreadable number becomes something `into_config` refuses rather
         // than a zero it would quietly save: `0` and "not a number" have to
         // stay different.
         interval: parse_int(text_of(hwnd, SET_INTERVAL).as_deref()).unwrap_or(0),
-        quota_on: is_checked(hwnd, SET_QUOTA_ON),
+        quota_on: checks.get(SET_QUOTA_ON),
         quota: parse_f64(text_of(hwnd, SET_QUOTA).as_deref()).unwrap_or(f64::NAN),
         font_size: parse_int(text_of(hwnd, SET_FONT).as_deref()).unwrap_or(-1),
         background: text_of(hwnd, SET_BG).unwrap_or_default(),
         foreground: text_of(hwnd, SET_FG).unwrap_or_default(),
         alert: text_of(hwnd, SET_ALERT).unwrap_or_default(),
         opacity: parse_int(text_of(hwnd, SET_OPACITY).as_deref()).unwrap_or(-1),
-        widget: is_checked(hwnd, SET_WIDGET),
+        widget: checks.get(SET_WIDGET),
     }
 }
 
-/// Whether one of our checkboxes is ticked. A missing control reads as unticked
-/// rather than as an error: the control failing to exist is a layout problem,
-/// not a settings one.
-pub(crate) fn is_checked(hwnd: HWND, id: i32) -> bool {
-    // SAFETY: `ctl` is a control of ours; `BM_GETCHECK` needs no buffer and
-    // returns the state directly.
-    unsafe {
-        GetDlgItem(Some(hwnd), id).ok().is_some_and(|ctl| {
-            SendMessageW(ctl, BM_GETCHECK, None, None).0 == BST_CHECKED
-        })
+/// Every owner-drawn checkbox on the window, and whether it is ticked.
+///
+/// The controls are `BS_OWNERDRAW`, so the system keeps no check state for them
+/// — `BM_SETCHECK` is accepted and silently discarded, and `BM_GETCHECK` always
+/// answers zero. This is where that state lives instead.
+///
+/// Keyed by control id in a `Vec` rather than held per-id in fields, because
+/// the two things that have to agree about it — `read_form` reading it and the
+/// `WM_DRAWITEM` handler painting it — both work from an id they were handed,
+/// and a fixed struct would need a `match` in both places to reach the same
+/// answer. It is a `RefCell` because the handler reaches it through a `&UiState`
+/// while the click path holds a `&mut UiState`, and threading a second borrow
+/// through the window proc to satisfy that would cost more than the borrow
+/// flag does.
+#[derive(Default)]
+pub(crate) struct Checks(RefCell<Vec<(i32, bool)>>);
+
+impl Checks {
+    /// The ticked state of one checkbox, defaulting to unticked.
+    ///
+    /// An id that was never written reads as unticked rather than as an error:
+    /// a control that failed to exist is a layout problem, not a settings one,
+    /// and this is the same answer the old `BM_GETCHECK` gave for one.
+    pub(crate) fn get(&self, id: i32) -> bool {
+        self.0
+            .borrow()
+            .iter()
+            .find(|(k, _)| *k == id)
+            .is_some_and(|(_, v)| *v)
+    }
+
+    pub(crate) fn set(&self, id: i32, value: bool) {
+        let mut all = self.0.borrow_mut();
+        match all.iter_mut().find(|(k, _)| *k == id) {
+            Some(slot) => slot.1 = value,
+            None => all.push((id, value)),
+        }
+    }
+
+    /// Flip one, and hand back the state it now holds — the auto-toggle a
+    /// `BS_AUTOCHECKBOX` would have done for us.
+    pub(crate) fn toggle(&self, id: i32) -> bool {
+        let next = !self.get(id);
+        self.set(id, next);
+        next
     }
 }
+
+/// The controls the window draws as tick boxes rather than as buttons.
+///
+/// The `WM_DRAWITEM` handler is handed an id and nothing else, so this is the
+/// one place that says which shape an id takes — and the click path reads it
+/// too, because an owner-drawn box has no auto-toggle and its click has to flip
+/// `Checks` by hand. That is what makes the two answers the same answer: a
+/// control drawn as a box is a control that toggles.
+///
+/// `SET_QUOTA_ON` and `SET_WIDGET` are here as well as the tile grid, and were
+/// the trap in spelling this "is a tile": they are boxes on the page, so a
+/// predicate that only knew the grid would draw two of the page's checkboxes as
+/// push buttons.
+pub(crate) fn is_checkbox(id: i32) -> bool {
+    TILE_IDS.contains(&id) || matches!(id, SET_QUOTA_ON | SET_AUTOSTART | SET_WIDGET)
+}
+
+/// The edit fields — the controls that need a well painted behind them.
+///
+/// An `EDIT` is the one class that cannot be owner-drawn, so its rounded border
+/// is drawn by the frame on the rectangle the control already occupies; this is
+/// the list `paint` walks to find them. The Timer page's two are here as well as
+/// the Settings page's seven, because the treatment belongs to the *control* and
+/// not to the page it happens to sit on.
+pub(crate) const EDIT_IDS: [i32; 9] = [
+    SET_BG,
+    SET_FG,
+    SET_ALERT,
+    SET_INTERVAL,
+    SET_QUOTA,
+    SET_FONT,
+    SET_OPACITY,
+    SET_TIMER_AT,
+    SET_TIMER_WAIT,
+];
 
 /// Push a config into the live controls. Used to load the page and to undo a
 /// failed save, so the page never shows one thing and believes another.
-pub(crate) fn write_form(hwnd: HWND, cfg: &Config) {
+pub(crate) fn write_form(hwnd: HWND, checks: &Checks, cfg: &Config) {
     let form = SettingsForm::from_config(cfg);
     for (i, id) in TILE_IDS.iter().enumerate() {
-        set_check(hwnd, *id, form.tiles[i]);
+        checks.set(*id, form.tiles[i]);
     }
     set_text(hwnd, SET_INTERVAL, &form.interval.to_string());
-    set_check(hwnd, SET_QUOTA_ON, form.quota_on);
+    checks.set(SET_QUOTA_ON, form.quota_on);
     set_text(hwnd, SET_QUOTA, &format_quota(form.quota));
     set_text(hwnd, SET_FONT, &form.font_size.to_string());
     set_text(hwnd, SET_BG, &form.background);
@@ -227,8 +300,8 @@ pub(crate) fn write_form(hwnd: HWND, cfg: &Config) {
     // Not from `form`: this one is read back from the registry every time the
     // page is written, because the registry, not the config, is what Windows
     // consults — see `crate::autostart`.
-    set_check(hwnd, SET_AUTOSTART, crate::autostart::enabled());
-    set_check(hwnd, SET_WIDGET, form.widget);
+    checks.set(SET_AUTOSTART, crate::autostart::enabled());
+    checks.set(SET_WIDGET, form.widget);
     // The quota field is only meaningful while its switch is on.
     set_enabled(hwnd, SET_QUOTA, form.quota_on);
     // Last, and from the Background field just written above rather than from
@@ -252,7 +325,7 @@ pub(crate) fn write_theme_button(hwnd: HWND, background: &str) {
 /// The form's own copy moves with the boxes so the glyph under the caption
 /// describes the colours the user is looking at.
 pub(crate) fn apply_preset(hwnd: HWND, state: &mut UiState) -> &'static str {
-    let (_, caption, bg, fg) = crate::ui::design::next_preset(&read_form(hwnd).background);
+    let (_, caption, bg, fg) = crate::ui::design::next_preset(&read_form(hwnd, &state.checks).background);
     set_text(hwnd, SET_BG, bg);
     set_text(hwnd, SET_FG, fg);
     set_text(hwnd, SET_THEME, caption);
@@ -374,12 +447,23 @@ pub(crate) fn set_text(hwnd: HWND, id: i32, value: &str) {
     }
 }
 
-pub(crate) fn set_check(hwnd: HWND, id: i32, value: bool) {
-    // SAFETY: `BM_SETCHECK` takes the state by value and needs no buffer.
+/// Tick or untick one checkbox, and repaint it.
+///
+/// The repaint is not optional the way `BM_SETCHECK`'s was: the mark is drawn
+/// by our own `WM_DRAWITEM`, so the control has no paint of its own to schedule
+/// and would keep showing the old state until something else invalidated it.
+pub(crate) fn set_check(state: &UiState, hwnd: HWND, id: i32, value: bool) {
+    state.checks.set(id, value);
+    repaint_control(hwnd, id);
+}
+
+/// Invalidate one control's rectangle, so the owner-draw handler runs again.
+fn repaint_control(hwnd: HWND, id: i32) {
+    // SAFETY: `ctl` is one of our own children; passing null for the rectangle
+    // means "all of it", which is what a control this small wants anyway.
     unsafe {
         if let Ok(ctl) = GetDlgItem(Some(hwnd), id) {
-            let state = if value { BST_CHECKED } else { 0 };
-            SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(state as usize)), None);
+            let _ = InvalidateRect(Some(ctl), None, false);
         }
     }
 }
@@ -415,13 +499,27 @@ pub(crate) fn control_id(wparam: WPARAM) -> i32 {
 pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     // The `BS_`/`ES_` flags are plain `i32` in the bindings while `WS_*` are a
     // newtype, hence the mixed casts — same as the sidebar's.
-    let check_style = WINDOW_STYLE(WS_CHILD.0 | (BS_AUTOCHECKBOX as u32) | WS_TABSTOP.0);
+    // Owner-drawn, all three classes, so the window wears one look rather than
+    // the system's. A checkbox and a push button are the same style here — the
+    // `WM_DRAWITEM` handler tells them apart by id — because what separates them
+    // is the shape drawn, not the control that reports the click.
+    //
+    // `BS_AUTOCHECKBOX` is *not* kept alongside it: `BS_` styles share one nibble
+    // and cannot be combined. What it gave us is the auto-toggle, which the
+    // handler does by hand instead.
+    let check_style = WINDOW_STYLE(WS_CHILD.0 | (BS_OWNERDRAW as u32) | WS_TABSTOP.0);
     for (i, id) in TILE_IDS.iter().enumerate() {
         create_control(parent, state, w!("BUTTON"), TILE_LABELS[i], check_style, *id);
     }
 
     // `ES_LEFT` is 0 in the bindings, so it is not spelled out here.
-    let edit_style = WINDOW_STYLE(WS_CHILD.0 | WS_BORDER.0 | (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0);
+    //
+    // `WS_BORDER` is dropped: an `EDIT` cannot be owner-drawn, so the well
+    // around it is painted by `WM_CTLCOLOREDIT`'s brush and the border it would
+    // otherwise draw is the system's squared one. What is left is a control with
+    // no edge of its own sitting inside a rounded outline `paint` draws — see
+    // `FIELD_INSET`, which is the ring of that outline left visible.
+    let edit_style = WINDOW_STYLE(WS_CHILD.0 | (ES_AUTOHSCROLL as u32) | WS_TABSTOP.0);
     // The quota is a decimal, the rest are whole numbers. `ES_NUMBER` rejects
     // the keystroke rather than the value, which is the right behaviour for a
     // field a user is typing into.
@@ -440,7 +538,10 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     // print the setting twice.
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_AUTOSTART);
     create_control(parent, state, w!("BUTTON"), "", check_style, SET_WIDGET);
-    let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_PUSHBUTTON as u32) | WS_TABSTOP.0);
+    // Owner-drawn too, and the same style as the checkboxes: `WM_DRAWITEM` is
+    // the only way to get a push button off the system's parts, which is why
+    // Save and Reload kept their native look while the boxes did not.
+    let button_style = WINDOW_STYLE(WS_CHILD.0 | (BS_OWNERDRAW as u32) | WS_TABSTOP.0);
     // One per colour row, sitting after the box it edits. Labelled for the
     // action rather than the colour, because the colour is the thing that
     // changes and a button that named it would be wrong the moment it worked.
@@ -453,6 +554,12 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     create_control(parent, state, w!("BUTTON"), "", button_style, SET_THEME);
     create_control(parent, state, w!("BUTTON"), "Save", button_style, SET_SAVE);
     create_control(parent, state, w!("BUTTON"), "Reload", button_style, SET_RESET);
+    // The header's own button, and the one control on this page that is not on a
+    // row at all: it acts on the whole form rather than editing a field, so
+    // `layout_settings` pins it to the page's top-right corner and no entry of
+    // `FIELD_ROWS` places it. It is created after the two above so the tab order
+    // on this page ends where the page does.
+    create_control(parent, state, w!("BUTTON"), "Reset to Default", button_style, SET_DEFAULTS);
     // The Speed Test page's, and the one control here that does not belong to
     // the Settings page. It shares the notification path all the same — one
     // `WM_COMMAND` stream, one `SetFont` sweep — and is separated by its own
@@ -479,7 +586,7 @@ pub(crate) fn create_settings(parent: HWND, state: &mut UiState) {
     create_control(parent, state, w!("BUTTON"), "Sleep", button_style, SET_TIMER_ACTION);
     create_control(parent, state, w!("BUTTON"), "Arm", button_style, SET_TIMER_ARM);
 
-    write_form(parent, &state.cfg);
+    write_form(parent, &state.checks, &state.cfg);
     write_timer(parent, &state.cfg);
 }
 
@@ -517,6 +624,10 @@ pub(crate) fn create_control(
 /// height without a scrollbar — and the minimum is a floor people actually
 /// drag the frame to.
 pub(crate) const TILE_COLS: usize = 2;
+/// Rows the tile grid takes: eight checkboxes in `TILE_COLS` columns, which is
+/// four. Named because card 1's height is its head plus exactly this many bands,
+/// and the painter claims one band per row.
+pub(crate) const TILE_ROWS: usize = 4;
 /// Gap between the tile columns, and between a caption's field and the value
 /// column beside it.
 pub(crate) const FIELD_GAP: i32 = 10;
@@ -530,45 +641,56 @@ pub(crate) const FIELD_GAP: i32 = 10;
 /// Every caption in `SET_ROW_LABELS` is written to fit this width.
 pub(crate) const LABEL_W: i32 = 150;
 
-/// Rows the whole settings page occupies. The tile grid takes the first four,
-/// a divider takes the fifth, and every labelled field under it takes one more.
+/// Width of a row's second control — the plan's number, or Reload beside the
+/// Save it undoes.
 ///
-/// The divider's own row is the one band on this page that is neither a control
-/// nor a caption, which is why it is named: the grid above it and the form below
-/// it are two different kinds of thing, and the rule is the only mark on the
-/// page that says so.
-pub(crate) const ROW_DIVIDER: usize = 4;
-pub(crate) const ROW_REFRESH: usize = 5;
-pub(crate) const ROW_PLAN: usize = 6;
-pub(crate) const ROW_FONT: usize = 7;
-pub(crate) const ROW_BG: usize = 8;
-pub(crate) const ROW_FG: usize = 9;
-pub(crate) const ROW_ALERT: usize = 10;
-pub(crate) const ROW_OPACITY: usize = 11;
-pub(crate) const ROW_STARTUP: usize = 12;
-pub(crate) const ROW_WIDGET: usize = 13;
+/// Not a field's width. The plan's number is a GB figure and Reload is a
+/// six-letter word, and handing either of them a full `FIELD_W` costs `150`
+/// pixels of a row whose first field has already taken `LABEL_W + FIELD_W`:
+/// measured against the card's own inside at the narrowest window, that runs
+/// the control `22`–`44` pixels past the plate's right edge, where it is
+/// clipped rather than wrapped. At a field's width the colour row fits and
+/// these two do not, which is the wrong way round — the third control is the
+/// one that should give way.
+pub(crate) const SECOND_W: i32 = 100;
+
+/// Rows the second card's form occupies, numbered from zero.
+///
+/// They start at zero rather than continuing the page's total because the tile
+/// grid above them is card 1 and carries its own numbering — `TILE_ROWS` — and
+/// the only band the two ever shared was the divider, which is gone. Numbering
+/// this card from zero is what lets `prefs_body_top` be the whole offset: row `n`
+/// of the form sits on `prefs_body_top + n * row_h`, with no term standing for
+/// the grid above it.
+pub(crate) const ROW_REFRESH: usize = 0;
+pub(crate) const ROW_PLAN: usize = 1;
+pub(crate) const ROW_FONT: usize = 2;
+pub(crate) const ROW_BG: usize = 3;
+pub(crate) const ROW_FG: usize = 4;
+pub(crate) const ROW_ALERT: usize = 5;
+pub(crate) const ROW_OPACITY: usize = 6;
+pub(crate) const ROW_STARTUP: usize = 7;
+pub(crate) const ROW_WIDGET: usize = 8;
 /// The dark/light button, above the two colours it writes rather than beside
 /// them: it is a way to *type into* the Background and Foreground fields, and a
 /// row under them is where a user looks after reading the two hex strings.
-pub(crate) const ROW_APPEARANCE: usize = 14;
-pub(crate) const ROW_SAVE: usize = 15;
-pub(crate) const SET_ROW_COUNT: usize = ROW_SAVE + 1;
+pub(crate) const ROW_APPEARANCE: usize = 9;
+pub(crate) const ROW_SAVE: usize = 10;
+/// The rows the second card's body holds. Its height is the card head plus this
+/// many bands — see `prefs_card_h`.
+pub(crate) const FORM_ROWS: usize = ROW_SAVE + 1;
 
-/// The Settings page's captions, one per row in paint order, with whatever a
-/// bare number would not say for itself. The four rows the tile grid occupies
-/// and the divider's row have no caption of their own — a checkbox carries its
-/// own label, and a rule carries none — so they are empty strings rather than a
-/// shorter array with an offset to get wrong.
+/// The Settings page's captions, one per row of the second card, in paint order.
 ///
-/// This is the page's own extension point, the way `page_rows` is for the
-/// metric pages: `page_rows` returns nothing here because the page has no
+/// Every row of this card carries a control and a caption, so not one entry is
+/// blank: the tile grid is card 1 and draws nothing from this table, and the
+/// rule that used to separate the grid from the form has no equivalent in a card
+/// that is bounded by its own rounded edge.
+///
+/// This is the page's own extension point the way the card tables in `pages`
+/// are for the metric pages: those return nothing here because the page has no
 /// metric on it, and every line a user reads is declared in this array.
-pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
-    "",
-    "",
-    "",
-    "",
-    "",
+pub(crate) const SET_ROW_LABELS: [&str; FORM_ROWS] = [
     "Refresh   ms",
     "Monthly plan   GB",
     "Font size   px",
@@ -586,9 +708,9 @@ pub(crate) const SET_ROW_LABELS: [&str; SET_ROW_COUNT] = [
 /// the controls are placed from.
 ///
 /// Separate from `SET_ROW_LABELS` rather than appended to it, because the two
-/// pages share only their arithmetic: the Settings page's rows include a tile
-/// grid and a divider that this one has none of, and a shared array would need
-/// offsets to say which half applied.
+/// pages share only their arithmetic: the Settings page's rows are card 2's,
+/// numbered from zero under a grid and a card head this one has neither of, and
+/// a shared array would need offsets to say which half applied.
 pub(crate) const TIMER_ROW_MODE: usize = 0;
 pub(crate) const TIMER_ROW_AT: usize = 1;
 pub(crate) const TIMER_ROW_WAIT: usize = 2;
@@ -638,6 +760,186 @@ pub(crate) fn right_hand_control(id: i32) -> bool {
     matches!(id, SET_RESET | SET_QUOTA)
 }
 
+// --- the two cards --------------------------------------------------------
+
+/// Card 1's caption, and the count in its head's right slot. Both are read by
+/// the painter, and the count is here rather than in `paint` because it is a
+/// property of the grid this module lays out: `TILE_ROWS * TILE_COLS` checkboxes
+/// are placed below it, and a head claiming a different number would be a claim
+/// about a grid nobody drew.
+pub(crate) const TILES_CARD_TITLE: &str = "Display Tiles";
+pub(crate) const TILES_BADGE: &str = "8 tiles";
+/// Card 2's caption.
+pub(crate) const PREFS_CARD_TITLE: &str = "Preferences";
+/// The page's own line, under the heading and above the first card. Lives here
+/// rather than in `paint` because the subtitle claims a band that `cards_top`
+/// counts: the painter walks the canvas and this module has to arrive at the
+/// same pixel the painter's first card starts on.
+pub(crate) const PAGE_SUBTITLE: &str = "Customize your ArboTray preferences";
+
+/// A colour swatch's width at 96 DPI, painted between a colour field and the Pick
+/// button beside it.
+///
+/// Square at 96: `SWATCH_W` and `CTL_H` are both 24, so the preview is a square
+/// with air either side of it. On a DPI where they differ the swatch shrinks to
+/// the control's height rather than growing taller than the row it belongs to —
+/// see `swatch_rect`.
+pub(crate) const SWATCH_W: i32 = 24;
+
+/// The header's Reset to Default button, at 96 DPI. Wide enough for the two
+/// words without ellipsis, and a button's width rather than a field's because it
+/// is a page-wide action and must not read as a setting with a value in it.
+pub(crate) const RESET_W: i32 = 132;
+
+/// Card 1's outer height: its head plus one band per grid row.
+///
+/// Written as `head_h + TILE_ROWS * row_h` and not as a sum of scaled terms,
+/// because this is the body the painter walks: `card` pads by `CARD_PAD` at the
+/// top, `card_head` consumes `head_h`, and `TILE_ROWS` calls to `space(row_h)`
+/// consume the rest. A height computed any other way would be a second answer.
+pub(crate) fn tiles_card_h(dpi: u32) -> i32 {
+    card_h(dpi, head_h(dpi) + TILE_ROWS as i32 * scale(ROW_H, dpi))
+}
+
+/// Card 2's outer height: its head plus one band per form row.
+pub(crate) fn prefs_card_h(dpi: u32) -> i32 {
+    card_h(dpi, head_h(dpi) + FORM_ROWS as i32 * scale(ROW_H, dpi))
+}
+
+/// Where the first card's top edge lands.
+///
+/// Summed as four scaled terms **in the painter's own walk order**, and that is
+/// load-bearing rather than stylistic: `scale` truncates, so a sum of scaled
+/// terms and the scaled sum differ by a pixel at some DPIs. The painter walks
+/// `space(PAD)`, `space(TITLE_PAD)`, `heading(row_h + TITLE_EXTRA*2)`,
+/// `subtitle` (one `row_h`), and this is that walk written out. A term out of
+/// order, or one of the two folded into the other, puts every control below it a
+/// pixel outside the card it is meant to be inside — which nothing else would
+/// catch, because a child window drawn outside its parent's card is not an error
+/// to anything.
+pub(crate) fn cards_top(dpi: u32) -> i32 {
+    scale(PAD, dpi)
+        + scale(TITLE_PAD, dpi)
+        + scale(ROW_H + TITLE_EXTRA * 2, dpi)
+        + scale(ROW_H, dpi)
+}
+
+/// The band card 1's first row of checkboxes sits on: past the card's edge, its
+/// padding, and its head.
+pub(crate) fn tiles_body_top(dpi: u32) -> i32 {
+    cards_top(dpi) + scale(CARD_PAD, dpi) + head_h(dpi)
+}
+
+/// The band card 2's first row sits on: past card 1 entirely, the lane between
+/// the two cards, card 2's padding and card 2's head.
+///
+/// One lane gap between the cards, because that is what `Canvas::card` leaves
+/// behind: it advances `top + height + LANE_GAP` when its body returns, so the
+/// second card starts a lane below the first rather than hard against it.
+pub(crate) fn prefs_body_top(dpi: u32) -> i32 {
+    cards_top(dpi) + tiles_card_h(dpi) + scale(LANE_GAP, dpi) + scale(CARD_PAD, dpi) + head_h(dpi)
+}
+
+/// Where a card's contents start, from the content column's left edge.
+///
+/// A card is painted across the whole of `x0..x1` — `Canvas::card` fills that
+/// rectangle and *then* indents itself — so a control at `x0` sits on the card's
+/// rounded border rather than inside it.
+pub(crate) fn card_inner_x0(x0: i32, dpi: u32) -> i32 {
+    x0 + scale(CARD_PAD, dpi)
+}
+
+/// Where a card's contents end, from the content column's right edge.
+pub(crate) fn card_inner_x1(x1: i32, dpi: u32) -> i32 {
+    x1 - scale(CARD_PAD, dpi)
+}
+
+/// The colour swatch's left edge: past the field and the gap that follows it.
+///
+/// Its own function rather than a term in `pick_x` because two callers need it —
+/// the position and the rectangle — and `swatch_x` composed with `pick_x` is the
+/// whole of the colour row's arithmetic: field, gap, swatch, gap, Pick.
+pub(crate) fn swatch_x(field_x: i32, field_w: i32, gap: i32) -> i32 {
+    field_x + field_w + gap
+}
+
+/// A Pick button's left edge: past the swatch and a gap of its own, which is what
+/// leaves the preview sitting between the box it describes and the button that
+/// changes it rather than touching either.
+pub(crate) fn pick_x(field_x: i32, field_w: i32, gap: i32, dpi: u32) -> i32 {
+    swatch_x(field_x, field_w, gap) + scale(SWATCH_W, dpi) + gap
+}
+
+/// The colour swatch itself.
+///
+/// Square where the scaled numbers allow it and capped at the control's height
+/// where they do not: `SWATCH_W` and `CTL_H` are both 24 at 96 DPI, but they
+/// scale independently — `scale` works in whole pixels — so at some DPIs a
+/// 24-pixel swatch beside a 23-pixel field would stand a pixel proud of the row
+/// it is previewing. Capping it at `ctl_h` is what keeps the swatch inside its
+/// band at every DPI, which is the property the tests hold it to.
+///
+/// The `min` can only ever choose `ctl_h`, since `SWATCH_W` is the narrower of
+/// the two at every DPI this app scales for; it is written as a `min` rather than
+/// as `ctl_h` so that a change to either constant cannot silently make the swatch
+/// wider than the row.
+pub(crate) fn swatch_rect(
+    field_x: i32,
+    field_w: i32,
+    gap: i32,
+    row_top: i32,
+    ctl_h: i32,
+    dpi: u32,
+) -> RECT {
+    let size = scale(SWATCH_W, dpi).min(ctl_h);
+    let left = swatch_x(field_x, field_w, gap);
+    RECT {
+        left,
+        top: row_top + (ctl_h - size) / 2,
+        right: left + size,
+        bottom: row_top + (ctl_h - size) / 2 + size,
+    }
+}
+
+/// What to preview beside a colour field, or `None` on a row that carries no
+/// colour.
+///
+/// Read from the form rather than from the box the user is looking at, because
+/// the form is what a Pick writes into and what Save reads out of: a preview
+/// taken from the control's text would be a third copy of a colour, and the one
+/// place it could disagree with the other two.
+///
+/// An unparseable string is `None` rather than a fallback colour: a swatch is a
+/// claim about what will be saved, and a field holding half a hex code has no
+/// colour to claim. The frame the painter draws around an empty swatch is
+/// therefore never drawn either — there is nothing to preview.
+pub(crate) fn swatch_colour(row: usize, form: &SettingsForm) -> Option<COLORREF> {
+    let hex = match row {
+        ROW_BG => form.background.as_str(),
+        ROW_FG => form.foreground.as_str(),
+        ROW_ALERT => form.alert.as_str(),
+        _ => return None,
+    };
+    crate::taskbar::render::parse_color(hex)
+}
+
+/// The header's Reset to Default button: `(left, top, width, height)`.
+///
+/// Pinned to the page's top-right rather than placed on a band, and centred
+/// against the heading it sits beside: `heading` draws from the top of a band
+/// `row_h + TITLE_EXTRA * 2` tall while a native button centres its own text in
+/// its rectangle, so a button at the band's top edge would read as a line of the
+/// heading rather than as a control. The subtraction is a half-difference of two
+/// *scaled* terms, which is the painter's own band height and the scaled chip.
+pub(crate) fn reset_button_rect(x1: i32, dpi: u32) -> (i32, i32, i32, i32) {
+    let h = scale(CHIP, dpi);
+    let w = scale(RESET_W, dpi);
+    let top = scale(PAD, dpi)
+        + scale(TITLE_PAD, dpi)
+        + (scale(ROW_H + TITLE_EXTRA * 2, dpi) - h) / 2;
+    (x1 - w, top, w, h)
+}
+
 /// How far a caption drops so it shares the centre line of the field beside it.
 ///
 /// Measured against the controls on the running page rather than derived: a
@@ -645,17 +947,13 @@ pub(crate) fn right_hand_control(id: i32) -> bool {
 /// metrics, while a row draws from the top of its band. Five pixels is what
 /// that came to on every row of the real page — re-measure after a change to
 /// the control font or to `CTL_H`.
+///
+/// The `field_drop(row, dpi)` helper that used to live beside this is gone with
+/// the grid: it answered "does this band carry a control", and every band of the
+/// second card carries one, so the answer was the same on every row that could
+/// ask. The constant is still the painter's — it is applied to every row of the
+/// card, unconditionally.
 pub(crate) const FIELD_DROP: i32 = 5;
-
-/// The drop for `row`, and zero on the bands that carry no control — the
-/// divider claims one, and moving it would slide the rule off its own band.
-pub(crate) fn field_drop(row: usize, dpi: u32) -> i32 {
-    if FIELD_ROWS.iter().any(|(_, r)| *r == row) {
-        scale(FIELD_DROP, dpi)
-    } else {
-        0
-    }
-}
 
 /// Whether a control is one of the colour fields' Pick buttons, which take a
 /// word's width rather than a field's. Kept apart from `right_hand_control`
@@ -929,35 +1227,70 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         }
         let row_h = scale(ROW_H, state.dpi);
         let ctl_h = scale(CTL_H, state.dpi);
+        let second_w = scale(SECOND_W, state.dpi);
         let nudge = scale(CTL_NUDGE, state.dpi);
-        // The first row of controls sits one title-height below the page
-        // heading, exactly where `paint` puts its first row — so the labels and
-        // the controls that belong to them share a band.
+        // The Timer page's own first band. That page is still a flat list of
+        // rows rather than cards, so it keeps `form_top`; the Settings page
+        // below measures from `cards_top` instead, which is one subtitle band
+        // further down the painter's walk.
         let top = form_top(state.dpi);
         let _ = h;
 
-        let field_w = scale(FIELD_W, state.dpi);
-        let pick_w = scale(PICK_W, state.dpi);
-        let gap = scale(FIELD_GAP, state.dpi);
-        let field_x = x0 + scale(LABEL_W, state.dpi);
-
-        for (i, id) in TILE_IDS.iter().enumerate() {
-            let (row, col) = tile_slot(i);
-            let (left, right) = tile_column(col, x0, x1, gap);
-            place(hwnd, *id, left, top + row_h * row as i32 + nudge, right - left, ctl_h);
+        // A card is painted across the whole content column and indents itself
+        // afterwards, so a control placed at `x0` sits on the card's rounded
+        // border rather than inside it. Everything on the card-borne page is
+        // placed from the cards' inner edges, and the tile grid — which used to
+        // span `x0..x1` — now spans the card's own width.
+        let ix0 = card_inner_x0(x0, state.dpi);
+        let ix1 = card_inner_x1(x1, state.dpi);
+        if ix1 <= ix0 {
+            return;
         }
 
+        let gap = scale(FIELD_GAP, state.dpi);
+        let field_w = scale(FIELD_W, state.dpi);
+        let pick_w = scale(PICK_W, state.dpi);
+        // The caption column, measured from the card's own edge so that a field
+        // and the caption the painter draws at the same edge keep their distance
+        // on a narrow window and a wide one alike.
+        let field_x = ix0 + scale(LABEL_W, state.dpi);
+
+        // The header's own button. The one control on this page with no row in
+        // `FIELD_ROWS`: it acts on the whole form rather than editing a field,
+        // so it is pinned to the top-right, level with the heading it belongs
+        // beside.
+        let (rx, ry, rw, rh) = reset_button_rect(x1, state.dpi);
+        place(hwnd, SET_DEFAULTS, rx, ry, rw, rh);
+
+        // Card 1: the tile grid. Two columns across the card's own width and
+        // `TILE_ROWS` bands of `row_h` — the same arithmetic `tiles_card_h`
+        // computed the card's height from, so the card cannot be a row short of
+        // the grid standing in it.
+        let grid = tiles_body_top(state.dpi);
+        for (i, id) in TILE_IDS.iter().enumerate() {
+            let (row, col) = tile_slot(i);
+            let (left, right) = tile_column(col, ix0, ix1, gap);
+            place(hwnd, *id, left, grid + row_h * row as i32 + nudge, right - left, ctl_h);
+        }
+
+        // Card 2: the form. Its rows are numbered from zero — the grid above is
+        // a card of its own and carries its own numbering — so a row's band is
+        // the card's body top plus the row index and nothing else.
+        let form = prefs_body_top(state.dpi);
         for (id, row) in FIELD_ROWS {
-            let y = top + row_h * row as i32 + nudge;
+            let y = form + row_h * row as i32 + nudge;
             // The second and third controls on a row sit past the field that
             // owns it: the plan's switch says whether the number beside it means
             // anything, Reload sits next to the Save it undoes, and a Pick button
-            // sits after the colour box it edits — narrow, so the three read as
-            // one row rather than as two fields with a gap between them.
+            // sits after the swatch that previews the colour box it edits —
+            // narrow, so the three read as one row rather than as two fields
+            // with a gap between them. The swatch is painted, not placed, but its
+            // column is what pushes Pick out, so the two answers come from one
+            // pair of functions.
             let (left, width) = if pick_button(id) {
-                (field_x + field_w + gap, pick_w)
+                (pick_x(field_x, field_w, gap, state.dpi), pick_w)
             } else if right_hand_control(id) {
-                (field_x + field_w + gap, field_w)
+                (field_x + field_w + gap, second_w)
             } else {
                 (field_x, field_w)
             };
@@ -969,9 +1302,15 @@ pub(crate) fn layout_settings(hwnd: HWND, state: &mut UiState) {
         // two buttons share the field column with the two edits: a "drop-down"
         // that was any narrower than the field under it would read as a second,
         // smaller kind of thing rather than as the same setting.
+        //
+        // Its field column is measured from the *page's* edge and not the card's,
+        // because that page has no card: the two only differ by `CARD_PAD`, and a
+        // Timer control that inherited the card's indent would be the one control
+        // in the window placed for a card that is not on its page.
+        let timer_field_x = x0 + scale(LABEL_W, state.dpi);
         for (id, row) in TIMER_FIELD_ROWS {
             let y = top + row_h * row as i32 + nudge;
-            place(hwnd, id, field_x, y, field_w, ctl_h);
+            place(hwnd, id, timer_field_x, y, field_w, ctl_h);
         }
 
         // The two page-owned buttons, pinned to the foot of the content column
@@ -1089,6 +1428,11 @@ pub(crate) fn foot_slot(
 pub(crate) fn control_ids() -> Vec<i32> {
     let mut ids: Vec<i32> = TILE_IDS.to_vec();
     ids.extend(FIELD_ROWS.iter().map(|(id, _)| *id));
+    // The header button, which `FIELD_ROWS` does not carry: it is not on a row.
+    // It is in this list all the same, because this list is the font sweep and
+    // the visibility sweep — a control left out of it would render in the system
+    // face, and would stay on screen on every other page.
+    ids.push(SET_DEFAULTS);
     ids.push(SET_SPEED);
     ids.push(SET_STOP);
     ids.push(SET_WATCH);
@@ -1185,7 +1529,7 @@ pub(crate) fn sync_watch_button(hwnd: HWND, state: &UiState) {
 /// than what was attempted: a write that failed says so, and nothing claims the
 /// taskbar changed when it did not.
 pub(crate) fn save_settings(hwnd: HWND, state: &mut UiState) -> String {
-    let form = read_form(hwnd);
+    let form = read_form(hwnd, &state.checks);
     let cfg = match form.into_config(&state.cfg) {
         Ok(cfg) => cfg,
         // Nothing is written and nothing is applied: the page keeps the values
@@ -1226,5 +1570,325 @@ pub(crate) fn repaint_after_settings(hwnd: HWND, state: &mut UiState) {
     unsafe {
         layout(hwnd, state);
         let _ = InvalidateRect(Some(hwnd), None, true);
+    }
+}
+
+// --- tests ----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The four scale factors this window is actually built at — 100%, 125%,
+    /// 150% and 200% — because `scale` truncates and a pixel of drift shows up
+    /// at some of them and not others. A test at 96 alone would pass on
+    /// arithmetic that is wrong at 150.
+    const DPIS: [u32; 4] = [96, 120, 144, 192];
+
+    fn row_h(dpi: u32) -> i32 {
+        scale(ROW_H, dpi)
+    }
+
+    /// A form whose three colours are all `hex`, so a swatch test cannot pass by
+    /// reading the wrong one of the three.
+    fn form_all(hex: &str) -> SettingsForm {
+        let mut f = SettingsForm::from_config(&Config::default());
+        f.background = hex.into();
+        f.foreground = hex.into();
+        f.alert = hex.into();
+        f
+    }
+
+    #[test]
+    fn the_cards_top_is_the_painters_walk_summed_term_by_term() {
+        for dpi in DPIS {
+            let walk = scale(PAD, dpi)
+                + scale(TITLE_PAD, dpi)
+                + scale(ROW_H + TITLE_EXTRA * 2, dpi)
+                + scale(ROW_H, dpi);
+            assert_eq!(cards_top(dpi), walk, "dpi {dpi}");
+        }
+        // And why the terms may not be folded into one sum: at 125% the scaled
+        // sum is 130 where the sum of the scaled terms is 129, a pixel of drift
+        // between the painter's canvas and every control below it — a child
+        // window sitting outside the card it belongs to, which Windows will draw
+        // without complaint. The four DPIs above are the ones this window really
+        // runs at; 96, 144 and 192 happen to agree, which is exactly why a test
+        // at one of them would not have caught the fold.
+        assert_ne!(
+            cards_top(120),
+            scale(PAD + TITLE_PAD + ROW_H + TITLE_EXTRA * 2 + ROW_H, 120),
+            "the walk is a sum of scaled terms, not a scaled sum"
+        );
+    }
+
+    #[test]
+    fn the_two_card_bodies_are_one_card_and_a_lane_apart() {
+        for dpi in DPIS {
+            // The gap between the two body tops is exactly the whole of card 1
+            // plus the lane `Canvas::card` leaves behind it. Nothing else may
+            // creep in: a term for the subtitle or the heading here and the two
+            // functions disagree about where the second card starts, which is
+            // the one thing they share.
+            assert_eq!(
+                prefs_body_top(dpi) - tiles_body_top(dpi),
+                tiles_card_h(dpi) + scale(LANE_GAP, dpi),
+                "dpi {dpi}"
+            );
+            // Spelled out once, so that a change to either card's padding or
+            // either head is a failure here rather than a row outside a card.
+            assert_eq!(
+                prefs_body_top(dpi) - tiles_body_top(dpi),
+                scale(2 * CARD_PAD, dpi)
+                    + head_h(dpi)
+                    + TILE_ROWS as i32 * row_h(dpi)
+                    + scale(LANE_GAP, dpi),
+                "dpi {dpi}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_card_control_sits_inside_the_card_that_owns_it() {
+        for dpi in DPIS {
+            let ctl_h = scale(CTL_H, dpi);
+            let nudge = scale(CTL_NUDGE, dpi);
+
+            // Card 1's grid: `TILE_ROWS` bands, each one inside the card.
+            let card_top = cards_top(dpi);
+            let grid_bottom = card_top + tiles_card_h(dpi);
+            for i in 0..TILE_IDS.len() {
+                let (r, _) = tile_slot(i);
+                let y = tiles_body_top(dpi) + row_h(dpi) * r as i32 + nudge;
+                assert!(y >= card_top, "tile {i} above its card, dpi {dpi}");
+                assert!(y + ctl_h <= grid_bottom, "tile {i} out of its card, dpi {dpi}");
+            }
+
+            // Card 2's form: every row a control is placed on, and every
+            // control inside the card — including the bottom row, which is the
+            // one a card a row short would cut through.
+            let prefs_top = card_top + tiles_card_h(dpi) + scale(LANE_GAP, dpi);
+            let prefs_bottom = prefs_top + prefs_card_h(dpi);
+            for (id, row) in FIELD_ROWS {
+                assert!(row < FORM_ROWS, "control {id} is off the card at dpi {dpi}");
+                let band = prefs_body_top(dpi) + row_h(dpi) * row as i32;
+                assert!(band >= prefs_top, "control {id} above the card, dpi {dpi}");
+                assert!(
+                    band + row_h(dpi) <= prefs_bottom,
+                    "control {id}'s band runs out of the card, dpi {dpi}"
+                );
+                let y = band + nudge;
+                assert!(
+                    y + ctl_h <= prefs_bottom,
+                    "control {id} hangs out of the card's bottom, dpi {dpi}"
+                );
+            }
+
+            // Every row of the card carries a control: a band with none would
+            // be a blank line in a form and, more to the point, a caption the
+            // painter draws with nothing beside it.
+            for row in 0..FORM_ROWS {
+                assert!(
+                    FIELD_ROWS.iter().any(|(_, r)| *r == row),
+                    "row {row} has no control at dpi {dpi}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_swatch_fits_inside_its_row_at_every_dpi() {
+        for dpi in DPIS {
+            let ctl_h = scale(CTL_H, dpi);
+            let (field_x, field_w, gap) = (100i32, scale(FIELD_W, dpi), scale(FIELD_GAP, dpi));
+            // The band top as the layout computes it: a row's band plus the
+            // nudge, which is where `paint` passes `top + nudge` too.
+            let row_top = prefs_body_top(dpi)
+                + row_h(dpi) * ROW_BG as i32
+                + scale(CTL_NUDGE, dpi);
+            let r = swatch_rect(field_x, field_w, gap, row_top, ctl_h, dpi);
+
+            // Inside its own band, top and bottom — the property that keeps the
+            // preview from bleeding into the row above or below it.
+            assert!(r.top >= row_top, "swatch above its band, dpi {dpi}");
+            assert!(r.bottom <= row_top + ctl_h, "swatch below its band, dpi {dpi}");
+            // Centred against the control it previews.
+            assert_eq!(
+                r.top - row_top,
+                (row_top + ctl_h) - r.bottom,
+                "swatch not centred in its band, dpi {dpi}"
+            );
+            // Square where it can be: at every DPI this app scales for, the
+            // swatch is the control's own height.
+            assert_eq!(r.bottom - r.top, r.right - r.left, "swatch not square, dpi {dpi}");
+            assert_eq!(r.right - r.left, ctl_h, "swatch is not the band's height, dpi {dpi}");
+            // And past the field it describes, so it never overlaps the box.
+            assert!(r.left >= field_x + field_w, "swatch over the field, dpi {dpi}");
+        }
+    }
+
+    #[test]
+    fn the_pick_button_clears_the_swatch_at_every_dpi() {
+        for dpi in DPIS {
+            let ctl_h = scale(CTL_H, dpi);
+            let (field_x, field_w, gap) = (100i32, scale(FIELD_W, dpi), scale(FIELD_GAP, dpi));
+            let row_top = prefs_body_top(dpi);
+            let r = swatch_rect(field_x, field_w, gap, row_top, ctl_h, dpi);
+            let pick = pick_x(field_x, field_w, gap, dpi);
+
+            // Strictly past it, with the gap the layout left: a Pick button that
+            // touched or overlapped the preview would read as one control with a
+            // stripe through it rather than as two.
+            assert!(pick >= r.right + gap, "Pick overlaps the swatch, dpi {dpi}");
+            assert_eq!(swatch_x(field_x, field_w, gap), r.left, "dpi {dpi}");
+            // The row's order: field, swatch, Pick. The plan's switch and Reload
+            // share a row the same way but with no preview between them, so this
+            // is the only row whose geometry has three terms.
+            assert!(field_x + field_w <= r.left, "dpi {dpi}");
+            assert!(r.left < pick, "dpi {dpi}");
+        }
+    }
+
+    #[test]
+    fn the_swatch_reads_the_row_it_belongs_to() {
+        let form = form_all("#FF8000");
+        let orange = crate::taskbar::render::parse_color("#FF8000").unwrap();
+        assert_eq!(swatch_colour(ROW_BG, &form), Some(orange));
+        assert_eq!(swatch_colour(ROW_FG, &form), Some(orange));
+        assert_eq!(swatch_colour(ROW_ALERT, &form), Some(orange));
+
+        // A row that carries no colour has no preview — the swatch is drawn on
+        // the three bands `swatch_rect` shares a column with, and nowhere else.
+        for row in [ROW_REFRESH, ROW_FONT, ROW_OPACITY, ROW_SAVE] {
+            assert_eq!(swatch_colour(row, &form), None, "row {row} previews a colour");
+        }
+
+        // Half a hex code has no colour to claim, so it claims none: a fallback
+        // swatch would be a picture of a setting that is not going to be saved.
+        let broken = form_all("#FF80");
+        assert_eq!(swatch_colour(ROW_BG, &broken), None);
+        assert_eq!(swatch_colour(ROW_FG, &broken), None);
+        assert_eq!(swatch_colour(ROW_ALERT, &broken), None);
+    }
+
+    #[test]
+    fn the_reset_button_sits_in_the_header_and_not_on_a_row() {
+        for dpi in DPIS {
+            let x1 = scale(crate::ui::layout::MIN_W, dpi) - scale(PAD, dpi);
+            let (left, top, w, h) = reset_button_rect(x1, dpi);
+
+            assert_eq!(h, scale(CHIP, dpi), "dpi {dpi}");
+            assert_eq!(w, scale(RESET_W, dpi), "dpi {dpi}");
+            // Flush with the content column's right edge, which is where the
+            // card's edge is too.
+            assert_eq!(left + w, x1, "dpi {dpi}");
+            // Inside the header band: below the top pad the page opens with, and
+            // above the first card's top edge.
+            assert!(top >= scale(PAD, dpi), "above the page's own top, dpi {dpi}");
+            assert!(top + h <= cards_top(dpi), "the button is into the cards, dpi {dpi}");
+            // And it is the only control on this page with no row: it is not one
+            // of the controls the form's own table places.
+            assert!(
+                !FIELD_ROWS.iter().any(|(id, _)| *id == SET_DEFAULTS),
+                "the header button has a form row it does not use"
+            );
+        }
+    }
+
+    #[test]
+    fn the_header_button_is_swept_with_the_page_it_belongs_to() {
+        // `show_controls` hides everything not named in its own table when the
+        // page is left, so a control missing from `control_ids` would never be
+        // shown at all — and would keep the system font besides.
+        assert!(control_ids().contains(&SET_DEFAULTS), "the header button is not swept");
+        // No control may be swept twice: the list is walked once per layout and
+        // once per page change.
+        let ids = control_ids();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "control {id} is in the sweep twice");
+        }
+        // And it is not one of the page-owned controls, which is what puts it in
+        // the Settings group `show_controls` falls through to.
+        for owned in [SET_SPEED, SET_STOP, SET_WATCH, SET_WATCH_RESET, SET_TIMER_ARM] {
+            assert_ne!(owned, SET_DEFAULTS, "the header button belongs to another page");
+        }
+    }
+
+    #[test]
+    fn the_card_indents_leave_room_for_a_colour_row() {
+        for dpi in DPIS {
+            let x0 = scale(crate::ui::layout::SIDEBAR_W + PAD, dpi);
+            let x1 = scale(crate::ui::layout::MIN_W - PAD, dpi);
+            let ix0 = card_inner_x0(x0, dpi);
+            let ix1 = card_inner_x1(x1, dpi);
+
+            assert!(ix1 > ix0, "the card has no inside at dpi {dpi}");
+            assert_eq!(ix0 - x0, scale(CARD_PAD, dpi), "dpi {dpi}");
+            assert_eq!(x1 - ix1, scale(CARD_PAD, dpi), "dpi {dpi}");
+
+            // The widest row on the card is a colour row, and the four
+            // columns it spans have to fit inside the card's own width — at
+            // the narrowest window the frame is dragged to, not only at the
+            // one it opens at.
+            let gap = scale(FIELD_GAP, dpi);
+            let field_x = ix0 + scale(LABEL_W, dpi);
+            let right = pick_x(field_x, scale(FIELD_W, dpi), gap, dpi) + scale(PICK_W, dpi);
+            assert!(right <= ix1, "the colour row runs off the card, dpi {dpi}");
+
+            // The rows the layout places — one field of `FIELD_W`, or a pair of
+            // them with a gap between — have to fit inside the content column
+            // at that same width. The pair is checked against the column rather
+            // than the card on purpose: it is the *engine* field that is the
+            // right-hand one, and it does not fit the narrower card at `MIN_W`.
+            // Widening the card would mean a smaller `CARD_PAD` and a swatch
+            // outside its row; the honest fix is a narrower field, and this
+            // test is where that would be noticed.
+            let column = x1 - x0;
+            let pair = scale(LABEL_W, dpi) + scale(FIELD_W, dpi) * 2 + gap;
+            assert!(pair <= column, "the plan row runs off the column, dpi {dpi}");
+        }
+    }
+
+    #[test]
+    fn the_card_ends_past_the_last_control_on_every_row() {
+        // Every row's rightmost control has to end inside the card's own
+        // inside, at the narrowest window the frame is dragged to. The three
+        // shapes a row can take are checked here, built from the same
+        // functions the layout places from, so this test cannot agree with
+        // itself while disagreeing with the page.
+        //
+        // The rows that carry a second control used to hand it a full
+        // `FIELD_W`, which ran the plan's number and the Reload button 22–44
+        // pixels past the plate's right edge — a control clipped by the card
+        // rather than wrapped, with nothing on the page to say it was there.
+        for dpi in DPIS {
+            let x0 = scale(crate::ui::layout::SIDEBAR_W + PAD, dpi);
+            let x1 = scale(crate::ui::layout::MIN_W - PAD, dpi);
+            let card_w = card_inner_x1(x1, dpi) - card_inner_x0(x0, dpi);
+            let gap = scale(FIELD_GAP, dpi);
+            let column = scale(LABEL_W, dpi);
+            let field = scale(FIELD_W, dpi);
+            let second = scale(SECOND_W, dpi);
+            let field_x = column;
+            let field_w = field;
+
+            // The plain row: one field, and nothing beside it.
+            assert!(column + field <= card_w, "the field row overruns, dpi {dpi}");
+
+            // The two right-hand rows: plan's number, and Reload.
+            let right_hand = column + field + gap + second;
+            assert!(right_hand <= card_w, "the right-hand row overruns, dpi {dpi}");
+            assert!(right_hand_control(SET_QUOTA), "the plan's number takes it, dpi {dpi}");
+            assert!(right_hand_control(SET_RESET), "so does Reload, dpi {dpi}");
+
+            // The colour row: field, preview, Pick. Three terms where the
+            // right-hand rows have two, and still the narrower of the pair
+            // only because Pick is a word and the second control above it is
+            // a `SECOND_W` field.
+            let swatch = scale(SWATCH_W, dpi);
+            let pick = pick_x(field_x, field_w, gap, dpi) + scale(PICK_W, dpi);
+            assert_eq!(pick, column + field + gap + swatch + gap + scale(PICK_W, dpi));
+            assert!(pick <= card_w, "the colour row overruns, dpi {dpi}");
+        }
     }
 }

@@ -1,10 +1,12 @@
 # ArboTray Feature Status
 
-Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.8.0** (`Cargo.toml:3`) — refreshed 2026-09-17. The previous revision covered v0.2.0.
+Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.10.0** (`Cargo.toml:3`) — refreshed 2026-09-18. The previous revision covered v0.9.0.
+
+All features are available to every user — there is no free tier, no premium tier, and no licence gate.
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
 
-Tree today: 16,695 lines of Rust across `src/`, **237 tests passing, 2 ignored**.
+Tree today: 18,653 lines of Rust across `src/`, **243 tests passing, 2 ignored**.
 
 ## Summary
 
@@ -13,7 +15,7 @@ Tree today: 16,695 lines of Rust across `src/`, **237 tests passing, 2 ignored**
 | Live Speed Widget | Done | `src/taskbar/mod.rs:48-55` formats into `down_text`/`up_text`; painted at `src/taskbar/render.rs:240-253` |
 | Always-on-Top Widget | Done | `src/widget/window.rs:231` `HWND_TOPMOST`; draggable by `HTCAPTION` (`:30`), 4 modules under `src/widget/` |
 | System Tray Icon | Partial | Icon, tooltip and menu complete (`src/taskbar/icon.rs:72-163`), but still no `NIF_INFO` — zero matches tree-wide |
-| Settings (UI) | Done | Page 8 of the sidebar, 16 rows: tiles, interval, plan, font, three colours with pickers, opacity, startup, widget, appearance, Save/Reload |
+| Settings (UI) | Done | Page 8 of the sidebar, two cards: "Display Tiles" (the 8 tile checkboxes, 2×4) and "Preferences" (11 rows, ending in the Save/Reload pair) |
 | Adapter Config | Not done | `GetAdaptersAddresses` reads the routed interface (`src/telemetry/adapter.rs:95`) but only to display it; no `config.adapter` field exists |
 | Dark & Light Theme | Done | Appearance row swaps both colour fields between presets (`src/ui/design.rs` `next_preset`); staged behind Save |
 | Dashboard | Done | 9-page sidebar (`src/ui/pages.rs:12`), charts with axes (`src/ui/chart.rs`), reusable modal, DPI-scaled |
@@ -29,7 +31,7 @@ Tree today: 16,695 lines of Rust across `src/`, **237 tests passing, 2 ignored**
 | Stopwatch | Done | `src/ui/stopwatch.rs` — start/stop/reset, `HH:MM:SS` on its own page |
 | Port Active | Done | `src/telemetry/ports.rs` — `GetExtendedTcpTable` with owner PID, scrollable list, Stop behind a confirmation |
 | Timer | Done | `src/power.rs` engine + page 7; sleeps or shuts down on a clock time or a countdown, behind a countdown popup |
-| Update check | Done | `src/update.rs` — background check, version on the Settings page, banner when a newer release exists |
+| Update check | Done | `src/update.rs` — background check, version on the System page's "This machine" card, banner when a newer release exists |
 | Start with Windows | Done | `ROW_STARTUP` toggle writing the `Run` key |
 
 Counts: **15 Done, 4 Partial, 4 Not done** — 23 rows, counted from the table above, which is the authority.
@@ -51,7 +53,11 @@ Icon, tooltip and the right-click menu are complete, including the drop-time `NI
 - Dashboard page: none — tray-level.
 
 ### Settings page
-Page 8, and the tallest page in the window — which is what `layout::START_H` is pinned to. Sixteen rows: a four-tile grid, a divider, then Refresh, Monthly plan, Font size, Background, Foreground, Alert, Opacity, Start with Windows, Desktop widget, Appearance, and the Save/Reload pair. All three colour rows pair a hex field with a `ChooseColorW` picker (`src/ui/settings.rs:312`); a dismissed dialog writes nothing.
+Page 8, and now two rounded cards rather than a flat list of rows. Card 1, "Display Tiles", holds the eight tile checkboxes in two columns by four rows; card 2, "Preferences", holds eleven rows — Refresh, Monthly plan, Font size, Background, Foreground, Alert, Opacity, Start with Windows, Desktop widget, Appearance, and the Save/Reload pair under the caption `Write config.json`. The divider that used to separate the two halves is gone; the card edge does that job now.
+
+`layout::START_H` is pinned to the **System** page's five-card stack, not to this one — System is the taller of the two. All three colour rows pair a hex field with a `ChooseColorW` picker (`src/ui/settings.rs:312`); a dismissed dialog writes nothing.
+
+The controls are native children — `EDIT` for the fields, `BS_OWNERDRAW` buttons for everything with a face — and the page paints only their captions and the cards behind them. `WM_DRAWITEM` sets `TRANSPARENT` on its DC before drawing any glyph: a `DrawTextW` left opaque fills its own text extent with the brush it was handed, which erased the accent square under a checked box's tick and cut a card-coloured hole in Save's fill.
 
 The page never holds a `Config` while the user types — `SettingsForm` keeps raw strings and `into_config` is the single place a typed value becomes a setting, so an emptied numeric field is "no value yet" rather than a `0` that erases the setting. Save writes through `Config::save()`; a write that fails reports it rather than claiming success. Nothing on the page is live until Save runs, and the page says so.
 
@@ -89,7 +95,7 @@ Nothing fires without being asked. A minute before the instant the popup comes u
 A timer whose moment passed while the machine was asleep is dropped with a note rather than fired at — that is what the engine's five-minute grace window is for.
 
 ### Update check
-`src/update.rs`: a background check that never blocks a paint, the version printed on the Settings page (`ArboTray 0.8.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
+`src/update.rs`: a background check that never blocks a paint, the version printed as a `Version` row on the System page's "This machine" card (`update::current()`, i.e. `CARGO_PKG_VERSION`, now `0.10.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
 
 ## Partial
 
@@ -108,10 +114,10 @@ Band, SSID and signal all work. Missing against "kekuatan sinyal, hingga pengelo
 - Next step: `WlanGetAvailableNetworkList` for a scan list on the Network page. Password management is gated on writing credentials, which is a security decision before it is a coding one.
 - Dashboard page: Network.
 
-### Theme opacity — a switch, not a value
-`theme.opacity` is read only as `== 0` (`src/taskbar/render.rs:222`): zero means "sample the taskbar colour underneath and paint with it", anything else means "use the configured background". So the Settings page's `Opacity   0-255` row offers 256 values and honours two of them.
+### Theme opacity — a real value on the widget, a switch on the strip
+`theme.opacity` means two different things, and both are now honest. On the **taskbar strip** it is still read only as `== 0` (`src/taskbar/render.rs:222`): zero means "sample the taskbar colour underneath and paint with it", anything else means "use the configured background" — the strip is a child of `Shell_TrayWnd`, which refuses `WS_EX_LAYERED`, so a real alpha is not available to it. On the **desktop widget** it is a genuine alpha passed to `SetLayeredWindowAttributes` (`src/widget/window.rs:293-299`), with `0` reading as `DEFAULT_ALPHA` = 190 rather than as fully opaque. So the `Opacity   0-255` row is a real number for the panel and a yes/no for the strip, which is one setting meaning one thing per surface rather than a lie.
 
-- Next step: either wire a real alpha path with `AlphaBlend`/`UpdateLayeredWindow`, or narrow the row to a checkbox that says what it actually does. The second is the honest one until someone asks for partial transparency.
+- Next step: the strip could take a real alpha the way the panel does if it ever moves off `Shell_TrayWnd`; until then the row's caption is the place to say which surface it moves.
 - Dashboard page: none — tray-level.
 
 ## Not done
@@ -151,5 +157,5 @@ Ordered by effort-to-value:
 1. **Explorer-restart supervisor** — the one outright correctness bug left. Re-attach instead of exiting; the comment already says so.
 2. **Notifier balloons** — `NIF_INFO` on the tray icon for quota alerts. The icon is installed and its tooltip already updates; this is the smallest remaining item.
 3. **Data Plan percentage** — one row on the Data page over a `quota_pct` that already exists.
-4. **Opacity, honestly** — either wire an alpha path or narrow the row. A 0-255 field that honours two values is a small lie in the UI.
-5. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed contract that `app` and `usage` depend on; unlocks Adapter Config after it.
+4. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed contract that `app` and `usage` depend on; unlocks Adapter Config after it.
+5. **Opacity caption** — the value is real on the panel and a switch on the strip; the row could say which.

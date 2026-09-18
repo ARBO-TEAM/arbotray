@@ -17,12 +17,12 @@
 //! is deliberate: measuring wrapped text needs a DC, and a hit test does not
 //! have one. The comment on [`CARD_H`] carries the ceiling that buys.
 
-use crate::ui::components::{Fonts, draw, draw_block, hairline, rounded_fill};
-use crate::ui::design::{Palette, RADIUS, S2, S3, mix};
+use crate::ui::components::{draw, draw_block, hairline, rounded_fill, Fonts};
+use crate::ui::design::{mix, Palette, RADIUS, S2, S3};
 use crate::ui::layout::{PAD, ROW_H, TITLE_EXTRA};
 use crate::ui::theme::scale;
 use windows::Win32::Foundation::{COLORREF, RECT};
-use windows::Win32::Graphics::Gdi::{DT_CENTER, DT_LEFT, HDC, SetTextColor};
+use windows::Win32::Graphics::Gdi::{SetTextColor, DT_CENTER, DT_LEFT, HDC};
 
 /// How wide the card is before the client rect gets a say.
 const CARD_W: i32 = 400;
@@ -186,8 +186,12 @@ pub(crate) fn rects(client: &RECT, dpi: u32) -> Rects {
     let client_h = client.bottom - client.top;
     // Never wider than the window it is centred in, with the page's own padding
     // left over on both sides.
-    let card_w = scale(CARD_W, dpi).min(client_w - scale(PAD, dpi) * 2).max(scale(220, dpi));
-    let card_h = scale(CARD_H, dpi).min(client_h - scale(PAD, dpi) * 2).max(1);
+    let card_w = scale(CARD_W, dpi)
+        .min(client_w - scale(PAD, dpi) * 2)
+        .max(scale(220, dpi));
+    let card_h = scale(CARD_H, dpi)
+        .min(client_h - scale(PAD, dpi) * 2)
+        .max(1);
     let cx = client.left + client_w / 2;
     let cy = client.top + client_h / 2;
     let card = RECT {
@@ -262,7 +266,15 @@ pub(crate) fn paint(dc: HDC, client: &RECT, modal: &Modal, fonts: &Fonts, pal: &
         rounded_fill(dc, r.card, RADIUS, pal.sidebar);
 
         SetTextColor(dc, pal.text);
-        draw(dc, fonts.title, &confirm.title, r.title.left, r.title.top, r.title.right, DT_LEFT);
+        draw(
+            dc,
+            fonts.title,
+            &confirm.title,
+            r.title.left,
+            r.title.top,
+            r.title.right,
+            DT_LEFT,
+        );
         // The body is the one thing here that can be more than one line, so it
         // gets the wrapping call rather than the single-line one.
         SetTextColor(dc, pal.muted);
@@ -300,15 +312,7 @@ const WHITE: COLORREF = COLORREF(0x00FF_FFFF);
 /// Filled rather than framed for the confirming one and outlined for the other,
 /// so the two do not read as a pair of equals: this is a question with a
 /// suggested answer, not a choice between two doors.
-fn button(
-    dc: HDC,
-    fonts: &Fonts,
-    rect: &RECT,
-    label: &str,
-    danger: bool,
-    pal: &Palette,
-    dpi: u32,
-) {
+fn button(dc: HDC, fonts: &Fonts, rect: &RECT, label: &str, danger: bool, pal: &Palette, dpi: u32) {
     let fill = if danger { pal.danger } else { pal.selected };
     let text = if danger { pal.accent_text } else { pal.text };
     // SAFETY: as above — a draw into the frame's DC.
@@ -361,8 +365,14 @@ mod tests {
         let r = rects(&CLIENT, DPI);
         for b in [&r.cancel, &r.confirm] {
             assert!(b.left >= r.card.left, "a button hangs off the card's left");
-            assert!(b.right <= r.card.right, "a button hangs off the card's right");
-            assert!(b.bottom <= r.card.bottom, "a button hangs off the card's foot");
+            assert!(
+                b.right <= r.card.right,
+                "a button hangs off the card's right"
+            );
+            assert!(
+                b.bottom <= r.card.bottom,
+                "a button hangs off the card's foot"
+            );
             assert!(b.top >= r.body.bottom, "a button overlaps the body text");
             assert!(b.right > b.left && b.bottom > b.top, "a button has no area");
         }
@@ -455,7 +465,11 @@ mod tests {
             }))
         );
         assert!(!m.is_open(), "the question survived its own answer");
-        assert_eq!(m.click(&CLIENT, DPI, x, y), None, "the popup answered twice");
+        assert_eq!(
+            m.click(&CLIENT, DPI, x, y),
+            None,
+            "the popup answered twice"
+        );
     }
 
     #[test]
@@ -470,7 +484,10 @@ mod tests {
             },
         });
         let r = rects(&CLIENT, DPI);
-        let (x, y) = ((r.cancel.left + r.cancel.right) / 2, (r.cancel.top + r.cancel.bottom) / 2);
+        let (x, y) = (
+            (r.cancel.left + r.cancel.right) / 2,
+            (r.cancel.top + r.cancel.bottom) / 2,
+        );
         assert_eq!(m.click(&CLIENT, DPI, x, y), Some(Outcome::Cancelled));
         assert!(!m.is_open());
     }

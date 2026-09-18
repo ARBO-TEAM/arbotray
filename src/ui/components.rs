@@ -2,7 +2,7 @@
 //!
 //! A page is assembled by walking a `Canvas`: each call draws one component and
 //! advances the vertical cursor. The painter then reads as the page's own
-//! contents — heading, section, five rows, a note — with no arithmetic between
+//! contents — heading, a card, three rows, a note — with no arithmetic between
 //! the lines of the list, which is where a hand-laid-out window usually goes
 //! wrong. Adding a row to a page is one call, and it cannot push the rows below
 //! it out of line because it never sees their coordinates.
@@ -11,16 +11,18 @@
 //! rectangle, a hairline, a glyph and a label-value pair, which is everything
 //! the four metric pages and the settings page are actually made of.
 
+use crate::ui::CLOCK_EXTRA;
 use crate::ui::design::{
-    CARD_PAD, CARD_RADIUS, CHIP, CHIP_TINT_PCT, GROUP_COL, ICON_CALENDAR, ICON_COL, LANE_GAP,
-    Palette, RADIUS, S1, S2, S3, S6, TILE_H, TRACK_H,
+    BOX, CARD_PAD, CARD_RADIUS, CHIP, CHIP_TINT_PCT, CTL_RADIUS, ICON_CALENDAR, ICON_CHECK, ICON_COL,
+    LANE_GAP, Palette, RADIUS, S1, S2, S3, S6, TILE_H, TRACK_H,
 };
 use crate::ui::theme::scale;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
     DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
     DT_VCENTER, DT_WORDBREAK, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, GetStockObject,
-    HDC, HGDIOBJ, HFONT, NULL_PEN, PS_SOLID, Polyline, RoundRect, SelectObject, SetTextColor,
+    HDC, HGDIOBJ, HFONT, NULL_BRUSH, NULL_PEN, PS_SOLID, Polyline, RoundRect, SelectObject,
+    SetTextColor,
 };
 
 /// The row height is generous on purpose: a single-line `DrawTextW` clips at the
@@ -171,6 +173,193 @@ pub(crate) unsafe fn rounded_fill(dc: HDC, rect: RECT, radius: i32, colour: COLO
     }
 }
 
+/// A one-pixel rounded outline, drawn inside `rect`.
+///
+/// `RoundRect` strokes with the current pen *and* fills with the current brush,
+/// so a border alone is the same call as `rounded_fill` with the hollow brush:
+/// the pen is the colour and the inside is left alone. The rect is shrunk by
+/// half a pixel on each side because the stroke is centred on the path, and a
+/// one-pixel pen on the path's own edge would be half clipped — which shows up
+/// as a border that is solid on two sides and faded on the other two.
+///
+/// # Safety
+/// `dc` must be a live DC.
+pub(crate) unsafe fn rounded_stroke(dc: HDC, rect: RECT, radius: i32, colour: COLORREF) {
+    // SAFETY: the pen and brush are created here, selected, then replaced and
+    // destroyed — so the DC never outlives either.
+    unsafe {
+        let pen = CreatePen(PS_SOLID, 1, colour);
+        let old_pen = SelectObject(dc, HGDIOBJ(pen.0));
+        let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        let _ = RoundRect(
+            dc,
+            rect.left,
+            rect.top,
+            rect.right - 1,
+            rect.bottom - 1,
+            radius,
+            radius,
+        );
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+/// A field's well: the recessed plate and its outline, as one call.
+///
+/// One call because they are one object and three callers draw it — the edit
+/// controls, the tick boxes and the buttons — so a well painted by one line and
+/// outlined by another is two places to be wrong about the same shape, and the
+/// failure reads as a rendering fault rather than as a misplaced rectangle.
+///
+/// # Safety
+/// `dc` must be a live DC.
+pub(crate) unsafe fn well(dc: HDC, rect: RECT, pal: &Palette, dpi: u32) {
+    let radius = scale(CTL_RADIUS, dpi);
+    // SAFETY: both helpers document their own contract.
+    unsafe {
+        rounded_fill(dc, rect, radius, pal.field);
+        rounded_stroke(dc, rect, radius, pal.edge);
+    }
+}
+
+/// A tick box, its mark, and the caption beside it.
+///
+/// The box is drawn at `BOX` and centred in `rect`, because the control it
+/// stands for is a row's full height while the mark is not: a box the height of
+/// the band would be a field, not a checkbox. `enabled` only dims the outline —
+/// a greyed box still has to show whether it is ticked, or the plan's number
+/// beside it looks disabled for no stated reason.
+///
+/// The caption is drawn here rather than left to the control because there is no
+/// control left to draw it: `BS_OWNERDRAW` takes the whole face away, text
+/// included. It is the *only* thing a label-less box like the startup one has to
+/// say, and a box drawn without it is a page of unlabelled squares.
+///
+/// # Safety
+/// `dc` must be a live DC, `font` the body face and `icon` the icon face.
+pub(crate) unsafe fn tick(
+    dc: HDC,
+    font: HFONT,
+    icon: HFONT,
+    rect: RECT,
+    text: &str,
+    checked: bool,
+    enabled: bool,
+    pal: &Palette,
+    dpi: u32,
+) {
+    let size = scale(BOX, dpi);
+    // Not `box`: that is a reserved keyword in edition 2024, so it cannot name a
+    // binding at all.
+    let mark = RECT {
+        left: rect.left,
+        top: rect.top + (rect.bottom - rect.top - size) / 2,
+        right: rect.left + size,
+        bottom: rect.top + (rect.bottom - rect.top - size) / 2 + size,
+    };
+    let radius = scale(CTL_RADIUS, dpi) / 2;
+    // SAFETY: both helpers document their own contract; the faces are the
+    // caller's and live.
+    unsafe {
+        if checked {
+            // Filled with the accent and no outline: the tick is the mark and a
+            // ring around a filled box is a second edge saying the same thing.
+            rounded_fill(dc, mark, radius, if enabled { pal.accent } else { pal.muted });
+            SetTextColor(dc, pal.accent_text);
+            draw_in(
+                dc,
+                icon,
+                &String::from_utf16_lossy(&[ICON_CHECK]),
+                mark,
+                DT_LEFT,
+            );
+        } else {
+            rounded_fill(dc, mark, radius, pal.field);
+            rounded_stroke(dc, mark, radius, if enabled { pal.edge } else { pal.muted });
+        }
+        if !text.is_empty() {
+            SetTextColor(dc, if enabled { pal.text } else { pal.muted });
+            // Left-aligned against the box rather than centred in what is left
+            // of the rectangle: the boxes are the column the reader scans down,
+            // and a caption centred in a column of two different widths is a
+            // caption that starts at two different places.
+            let mut run = RECT {
+                left: mark.right + scale(S2, dpi),
+                right: rect.right,
+                ..rect
+            };
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            SelectObject(dc, HGDIOBJ(font.0));
+            DrawTextW(
+                dc,
+                &mut wide,
+                &mut run,
+                DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | DT_LEFT,
+            );
+        }
+    }
+}
+
+/// A push button's face: its fill, its outline and its caption.
+///
+/// `primary` is the one button on a page that commits something — Save. It is
+/// filled with the accent rather than outlined, which is the whole of what makes
+/// it read as the default action rather than as one of three peers. `focused`
+/// and `pressed` are separate flags rather than one "active" because the fill
+/// differs: focus is a step off the plate and a press is a step into it.
+///
+/// There is no hover, and its absence is not an oversight: a button is a child
+/// window, so a pointer over one sends `WM_MOUSEMOVE` to the *button* and never
+/// reaches the frame's handler that tracks the sidebar's hover. Painting one
+/// would mean subclassing every button to forward its own mouse messages, for a
+/// highlight the press already gives.
+///
+/// # Safety
+/// `dc` must be a live DC and `font` a live font.
+pub(crate) unsafe fn button_face(
+    dc: HDC,
+    font: HFONT,
+    rect: RECT,
+    text: &str,
+    primary: bool,
+    focused: bool,
+    pressed: bool,
+    enabled: bool,
+    pal: &Palette,
+    dpi: u32,
+) {
+    let radius = scale(CTL_RADIUS, dpi);
+    let (fill, edge, ink) = if !enabled {
+        (pal.field, pal.muted, pal.muted)
+    } else if primary {
+        let fill = if pressed {
+            crate::ui::design::mix(pal.accent, COLORREF(0), 25)
+        } else if focused {
+            crate::ui::design::mix(pal.accent, COLORREF(0x00FF_FFFF), 15)
+        } else {
+            pal.accent
+        };
+        (fill, fill, pal.accent_text)
+    } else if pressed {
+        (pal.control, pal.edge, pal.text)
+    } else if focused {
+        (pal.selected, pal.edge, pal.text)
+    } else {
+        (pal.card, pal.edge, pal.text)
+    };
+    // SAFETY: the helpers document their own contracts; `font` is the caller's.
+    unsafe {
+        rounded_fill(dc, rect, radius, fill);
+        if !primary {
+            rounded_stroke(dc, rect, radius, edge);
+        }
+        SetTextColor(dc, ink);
+        draw_in(dc, font, text, rect, DT_CENTER);
+    }
+}
+
 /// A glyph in a tinted plate: the mark a card or a tile leads with.
 ///
 /// Plate and glyph are one call because they are one object. The tint exists
@@ -259,6 +448,16 @@ pub(crate) fn meter_h(row_h: i32, dpi: u32) -> i32 {
     row_h + scale(TRACK_H, dpi) + scale(S2, dpi)
 }
 
+/// An empty-state line, at the height `empty` claims for it.
+pub(crate) fn empty_h(row_h: i32, dpi: u32) -> i32 {
+    scale(S6, dpi) + row_h
+}
+
+/// A card's hero reading, at the height `hero` claims for it.
+pub(crate) fn hero_h(dpi: u32) -> i32 {
+    scale(S3 + CLOCK_EXTRA + 2 * S2, dpi)
+}
+
 /// A card's outer height, from the height of what goes inside it.
 pub(crate) fn card_h(dpi: u32, content: i32) -> i32 {
     scale(2 * CARD_PAD, dpi) + content
@@ -296,7 +495,8 @@ pub(crate) struct Fonts {
     pub bold: HFONT,
     /// The page heading.
     pub title: HFONT,
-    /// A section caption, between the body and the heading.
+    /// A caption face, between the body and the heading. Used for a card's
+    /// head, its tiles and its meters.
     pub caption: HFONT,
     /// The Stopwatch page's reading. Body-sized on every other page by
     /// construction — nothing but the clock reaches for it.
@@ -335,14 +535,6 @@ pub(crate) struct Canvas<'a> {
     /// Replaces the palette's body colour for rows. Set for a whole page — an
     /// over-quota window is red top to bottom rather than red in a footnote.
     emph: Option<COLORREF>,
-    /// Whether rows are drawn past the group-heading column.
-    ///
-    /// Sticky rather than per-row: a heading is drawn on its group's *first*
-    /// row's band, and if only that row moved, the heading would sit beside it
-    /// and every row under it would start in a different place — a group that
-    /// looks ragged. Once a page has a heading, all of its rows share the
-    /// column the heading left for them.
-    indented: bool,
 }
 
 impl<'a> Canvas<'a> {
@@ -366,7 +558,6 @@ impl<'a> Canvas<'a> {
             row_h,
             nudge,
             emph: None,
-            indented: false,
         }
     }
 
@@ -380,15 +571,9 @@ impl<'a> Canvas<'a> {
         self.emph.unwrap_or(self.pal.text)
     }
 
-    /// The left edge a row's label is drawn from. Past the heading column once
-    /// this page has drawn one, so a label never collides with the heading on
-    /// its own band.
+    /// The left edge a row's label is drawn from.
     fn label_x(&self) -> i32 {
-        if self.indented {
-            self.x0 + GROUP_COL + S2
-        } else {
-            self.x0
-        }
+        self.x0
     }
 
     /// Where the cursor is. The painter uses it to place the sparkline under
@@ -426,95 +611,10 @@ impl<'a> Canvas<'a> {
         self.y += band;
     }
 
-    /// A muted caption naming the group of rows that follow, with a rule under
-    /// it, on a band of its own.
-    ///
-    /// This is the *standalone* group caption, for a list whose rows are not
-    /// page rows — the Data page's day list, whose labels are runtime dates. A
-    /// metric page uses `heading_row` instead, which costs no vertical space.
-    pub(crate) fn section(&mut self, text: &str) {
-        self.space(S3);
-        // SAFETY: as above; `hairline` documents its own contract.
-        unsafe {
-            SetTextColor(self.dc, self.pal.muted);
-            draw(
-                self.dc,
-                self.fonts.caption,
-                &text.to_uppercase(),
-                self.x0,
-                self.y,
-                self.x1,
-                DT_LEFT,
-            );
-            let rule = self.y + self.row_h - S1;
-            hairline(self.dc, self.x0, self.x1, rule, self.pal.border);
-        }
-        self.y += self.row_h;
-    }
-
-    /// A faint rule on a band of its own, dividing the rows above it from the
-    /// rows below.
-    ///
-    /// The counterpart of `section` for a group whose heading is already
-    /// painted: a `section` caption is a component's own text, drawn at the
-    /// content edge, while the Settings page's captions sit *behind* a control
-    /// at that same edge and would be covered by it. This draws the one part of
-    /// a section that carries no text, and claims a band so that the rule has
-    /// nothing to run through.
-    pub(crate) fn rule(&mut self) {
-        // SAFETY: a live DC, and `hairline` documents its own contract.
-        unsafe {
-            let rule = self.y + self.row_h - S1;
-            hairline(self.dc, self.x0, self.x1, rule, self.pal.border);
-        }
-        self.y += self.row_h;
-    }
-
-    /// A group heading drawn *on* the band of the row it names, with a faint
-    /// rule filling the space beside it.
-    ///
-    /// It costs no vertical space and moves nothing, which is the whole reason
-    /// the group headings can be added to pages that are already laid out: a
-    /// heading that claimed a band of its own would push every row below it
-    /// down, and the row order — which is the thing the pages are actually
-    /// careful about — would then depend on where someone put a caption.
-    ///
-    /// The heading is drawn at the content edge and the rows it governs are
-    /// indented past the column it leaves (`label_x`), so the two never share a
-    /// pixel. It is *not* ellipsised: it is clipped to its column, because a
-    /// heading cut off mid-word still reads as a heading, while one ending in an
-    /// ellipsis reads as a value someone truncated.
-    pub(crate) fn heading_row(&mut self, text: &str) {
-        self.indented = true;
-        // SAFETY: as above; `hairline` documents its own contract.
-        unsafe {
-            SetTextColor(self.dc, self.pal.muted);
-            let right = self.x0 + GROUP_COL;
-            draw(
-                self.dc,
-                self.fonts.caption,
-                &text.to_uppercase(),
-                self.x0 + S1,
-                self.y + self.nudge,
-                right,
-                DT_LEFT,
-            );
-            hairline(
-                self.dc,
-                right + S2,
-                self.x1,
-                self.y + self.row_h / 2,
-                self.pal.border,
-            );
-        }
-    }
-
     /// A caption with its value right-aligned on the same band.
     ///
-    /// The label's left edge is `label_x`, which is where the group headings
-    /// pushed it once this page drew one; the value stays pinned to the right
-    /// edge either way, so the values column of a page is a single line down it
-    /// regardless of how the labels are indented.
+    /// The label's left edge is `label_x`; the value stays pinned to the right
+    /// edge, so the values column of a page is a single line down it.
     pub(crate) fn row(&mut self, label: &str, value: &str) {
         self.row_aligned(label, value, 0);
     }
@@ -629,9 +729,8 @@ impl<'a> Canvas<'a> {
     ///
     /// The track is inside the row's own band rather than on one of its own, so
     /// a bar that appears the moment a run starts cannot push the rows beneath
-    /// it down — the same reason the group headings ride on a row. The band is
-    /// 30 pixels and single-line text is about 17 of them, so the last few are
-    /// free.
+    /// it down. The band is 30 pixels and single-line text is about 17 of them,
+    /// so the last few are free.
     pub(crate) fn progress(&mut self, label: &str, value: &str, percent: u32) {
         let top = self.y;
         self.row(label, value);
@@ -680,6 +779,34 @@ impl<'a> Canvas<'a> {
             );
         }
         self.y += self.row_h;
+    }
+
+    /// A card's hero reading: one number large enough to be the reason the card
+    /// is there.
+    ///
+    /// Drawn through `draw` rather than as a row for the same reason the
+    /// Stopwatch page's clock is: `fonts.clock` is taller than a band of body
+    /// text, and a row would clip the face that carries the reading. The cursor
+    /// moves by `hero_h`, which is the face plus the air around it, so the
+    /// painter sizing a card and the card drawing its contents stay one
+    /// expression. Body colour, not the muted caption colour — this is the value
+    /// itself.
+    pub(crate) fn hero(&mut self, dpi: u32, text: &str) {
+        // SAFETY: a live DC and faces owned by the caller's frame; `draw`
+        // documents its own contract.
+        unsafe {
+            SetTextColor(self.dc, self.pal.text);
+            draw(
+                self.dc,
+                self.fonts.clock,
+                text,
+                self.x0,
+                self.y + scale(S3, dpi),
+                self.x1,
+                DT_LEFT,
+            );
+        }
+        self.y += hero_h(dpi);
     }
 
     // --- the card components -------------------------------------------------
@@ -1002,24 +1129,9 @@ mod tests {
         c.heading("Overview", 44);
         assert_eq!(c.y() - start, 44, "a heading owns the band it was given");
 
-        let after_heading = c.y();
-        c.section("Traffic");
-        assert!(
-            c.y() - after_heading >= 30,
-            "a section owns a band plus its own gap"
-        );
-
         let before_row = c.y();
         c.row("Download", "1.4G");
         assert_eq!(c.y() - before_row, 30, "a row is exactly one band");
-
-        // The load-bearing property of the page-wide grouping: a heading rides
-        // on a row's band, so adding one to a page cannot move any row. If this
-        // ever moves, every grouping assertion over row *order* still passes
-        // while the pages have quietly grown taller than the window.
-        let before_head = c.y();
-        c.heading_row("Traffic");
-        assert_eq!(c.y(), before_head, "a group heading must not claim a band");
 
         // The track is drawn *inside* the band the row already claimed, which
         // is the only reason a bar can appear mid-run without moving the page.
@@ -1032,10 +1144,21 @@ mod tests {
         assert_eq!(c.y() - before_note, 30);
 
         // The one component that must *not* move it: the empty state stands in
-        // for rows that are absent, so it takes its own gap and one band.
+        // for rows that are absent, so it takes its own gap and one band. Asked
+        // as `empty_h`, which is the same expression the painter sizes an empty
+        // card with — a hand-written `30 + 24` here would agree with the
+        // component today and stop agreeing with the model the moment either
+        // moved.
+        const DPI: u32 = 96;
         let before_empty = c.y();
         c.empty("No usage recorded yet.");
-        assert_eq!(c.y() - before_empty, 30 + 24);
+        assert_eq!(c.y() - before_empty, empty_h(30, DPI));
+
+        // The hero reading: a face taller than a row, so it claims more than a
+        // band — and the painter sums `hero_h` to size the card around it.
+        let before_hero = c.y();
+        c.hero(DPI, "00:00:00.00");
+        assert_eq!(c.y() - before_hero, hero_h(DPI));
     }
 
     /// The cards, and the one property that makes them safe to lay out: a card
@@ -1101,6 +1224,12 @@ mod tests {
         assert_eq!(head_h(DPI), CHIP + S2);
         assert_eq!(lane_h(DPI), TILE_H + S2);
         assert_eq!(meter_h(30, DPI), 30 + TRACK_H + S2);
+        // And the two a card's body may end on: an empty line and a hero
+        // reading. Both are sums the painter adds up to size a card, so a card
+        // whose height is built from one and whose body draws the other is a
+        // card whose last row runs through its own bottom edge.
+        assert_eq!(empty_h(30, DPI), S6 + 30);
+        assert_eq!(hero_h(DPI), S3 + CLOCK_EXTRA + 2 * S2);
 
         // The pill rides a band without claiming one, which is the only reason
         // the date can sit on the title's own line.

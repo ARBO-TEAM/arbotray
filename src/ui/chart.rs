@@ -17,13 +17,13 @@
 
 use crate::taskbar::format_rate;
 use crate::taskbar::render::sparkline_points;
-use crate::ui::components::{Canvas, draw, hairline};
-use crate::ui::design::{Palette, S1, S2, mix};
+use crate::ui::components::{draw, hairline, Canvas};
+use crate::ui::design::{mix, Palette, S1, S2};
 use crate::ui::theme::scale;
 use windows::Win32::Foundation::{COLORREF, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DT_LEFT, DT_RIGHT, DeleteObject, GetStockObject, HGDIOBJ, NULL_PEN,
-    PS_SOLID, Polygon, Polyline, SelectObject,
+    CreatePen, CreateSolidBrush, DeleteObject, GetStockObject, Polygon, Polyline, SelectObject,
+    DT_LEFT, DT_RIGHT, HGDIOBJ, NULL_PEN, PS_SOLID,
 };
 
 /// The column the value labels are right-aligned in. Wide enough for the
@@ -73,13 +73,7 @@ pub(crate) fn ago_label(samples: usize, interval_ms: u32) -> String {
 /// The caller has already decided the area is worth offering — but it cannot
 /// know that the plot inside it survives the gutter and the label strip, which
 /// is the one thing this can still refuse.
-pub(crate) fn paint(
-    c: &Canvas,
-    area: RECT,
-    history: &[u64],
-    interval_ms: u32,
-    dpi: u32,
-) -> bool {
+pub(crate) fn paint(c: &Canvas, area: RECT, history: &[u64], interval_ms: u32, dpi: u32) -> bool {
     if history.len() < 2 {
         return false;
     }

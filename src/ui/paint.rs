@@ -8,31 +8,33 @@
 //! put the controls on.
 
 use crate::ui::components::{
-    Canvas, Fonts, card_h, draw, head_h, lane_h, meter_h,
+    Canvas, Fonts, card_h, empty_h, head_h, hero_h, lane_h, meter_h, rounded_fill,
 };
 use crate::ui::design::{
-    ICON_DESKTOP, ICON_LATENCY, ICON_LIVE, ICON_MACHINE, ICON_MEMORY, ICON_STORAGE, ICON_TRAFFIC,
-    ICON_UP, ICON_DOWN, ICON_USAGE, S2, S3, palette,
+    CARD_PAD, FIELD_INSET, ICON_DATA, ICON_DESKTOP, ICON_LATENCY, ICON_LIVE, ICON_MACHINE,
+    ICON_MEMORY, ICON_NETWORK, ICON_PORTS, ICON_SPEED, ICON_STOPWATCH, ICON_STORAGE, ICON_TIMER,
+    ICON_TILES, ICON_TRAFFIC, ICON_TUNE, ICON_UP, ICON_DOWN, ICON_USAGE, RADIUS, S2, S3, palette,
 };
 use crate::power;
+use crate::ui::consts::{CTL_H, FIELD_W};
 use crate::ui::pages::{
-    DATA, OVERVIEW, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER, page_rows,
-    page_section, page_shows_graph, pct_of, usage_rows,
+    DATA, NETWORK, OVERVIEW, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER,
+    connection_rows, health_rows, page_shows_graph,
+    pct_of, socket_rows, usage_rows, usage_totals,
 };
 use crate::ui::settings::{
-    FIELD_DROP, ROW_APPEARANCE, ROW_DIVIDER, SET_ROW_LABELS, TIMER_LABELS, field_drop,
-    foot_button_top,
+    FIELD_DROP, FIELD_GAP, LABEL_W, PAGE_SUBTITLE, PREFS_CARD_TITLE, ROW_APPEARANCE,
+    SET_ROW_LABELS, TILES_BADGE, TILES_CARD_TITLE, TIMER_LABELS, TILE_ROWS, card_inner_x0,
+    foot_button_top, prefs_card_h, swatch_colour, swatch_rect, tiles_card_h,
 };
 use crate::ui::theme::scale;
-use crate::ui::{
-    CLOCK_EXTRA, PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState,
-};
-use windows::Win32::Foundation::{HWND, RECT};
+use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DEFAULT_GUI_FONT, DT_LEFT, DeleteObject, FillRect, GetDC, GetStockObject,
-    HGDIOBJ, NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject, HGDIOBJ,
+    MapWindowPoints, NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, TRANSPARENT,
 };
-use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetDlgItem, GetWindowRect, IsWindowVisible};
 
 /// The band the Overview's history chart fills, in 96-DPI pixels.
 ///
@@ -136,30 +138,14 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             c.emphasise(pal.danger);
         }
 
-        // Which heading the page has drawn last, so a group opened by two rows
-        // — "Connection" is either the SSID or the adapter, whichever is there —
-        // draws one heading rather than one per row.
-        //
-        // The Overview and System pages are skipped: they are cards now, drawn
-        // by the two branches below, and a row list under a card would be the
-        // same numbers twice.
-        if page != OVERVIEW && page != SYSTEM {
-            let mut drawn: Option<&'static str> = None;
-            for (label, value) in &page_rows(page, &state.model) {
-                // A metric page is a wall of pairs, and ten of them with nothing
-                // between them is a wall ten rows tall. The headings come from
-                // the page's own anchor table and are drawn *on* the row they
-                // name, so grouping costs no vertical space and cannot move a
-                // row out of order. Anchored on the row, so a group whose first
-                // row is switched off has no heading rather than one standing
-                // over someone else's rows.
-                if let Some(name) = page_section(page, label, drawn) {
-                    c.heading_row(name);
-                    drawn = Some(name);
-                }
-                c.row(label, value);
-            }
-        }
+        // There is no generic row list any more. Every page but Settings draws
+        // itself as cards below — Settings draws native controls over its own
+        // painted captions — so a page-wide loop over a row table would print
+        // the same figures twice on every page that has a card, and the only
+        // thing left for it to draw would be a page that has neither. The
+        // exclusivity that used to need a test (`page_has_cards` against
+        // `page_rows`) is structural now: there is no second mechanism to
+        // disagree with the first.
 
         // --- Overview: three cards, each one a group of readings ------------
         //
@@ -346,99 +332,215 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
             }
         }
 
-        // The Data page's day-by-day breakdown, under the two totals above it.
-        // Its rows carry runtime dates rather than the metric pages' fixed
-        // captions, which is why they are not in `page_rows`.
-        if page == DATA {
-            let days = usage_rows(&state.model);
-            if days.is_empty() {
-                c.empty("No usage recorded yet.");
-            } else {
-                c.section("Recent days");
-                for (day, bytes) in days {
-                    c.row(&day, &crate::telemetry::usage::format_size(bytes));
-                }
+        // --- Network: what the machine is plugged into, then what is on it -----
+        if page == NETWORK {
+            let dpi = state.dpi;
+            // The adapter leads as the subtitle because it is the subject of
+            // every address in the card below: six numbers with nothing attached
+            // to them is the failure this page exists to avoid.
+            c.subtitle(&state.model.adapter_text);
+
+            // Connection: the identity of the link, top to bottom — which
+            // network, through which interface, on which address, through which
+            // router, with which resolvers. Read as one object rather than as
+            // five unrelated rows.
+            let connection = connection_rows(&state.model);
+            if !connection.is_empty() {
+                let inner = head_h(dpi) + connection.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_NETWORK, pal.tile_blue, "Connection", "");
+                    for (label, value) in &connection {
+                        c.row(label, value);
+                    }
+                });
+            }
+
+            // Traffic: the three live readings as one lane — the same three the
+            // Overview leads with, in the same tints, so a number means one thing
+            // on both pages. A machine with any of the three switched off falls
+            // back to rows rather than to two tiles and a hole where the third
+            // belongs.
+            let tiles = [
+                (pal.tile_blue, ICON_DOWN, state.model.down_text.as_str(), "Download"),
+                (pal.tile_violet, ICON_UP, state.model.up_text.as_str(), "Upload"),
+                (pal.tile_amber, ICON_LATENCY, state.model.latency_text.as_str(), "Latency"),
+            ];
+            let traffic: Vec<_> = tiles.iter().filter(|t| !t.2.is_empty()).collect();
+            if !traffic.is_empty() {
+                let inner = if traffic.len() == 3 {
+                    head_h(dpi) + lane_h(dpi)
+                } else {
+                    head_h(dpi) + traffic.len() as i32 * row_h
+                };
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_TRAFFIC, pal.tile_violet, "Traffic", "");
+                    if traffic.len() == 3 {
+                        c.stat_lane(dpi, tiles);
+                    } else {
+                        for (_, _, value, caption) in &traffic {
+                            c.row(caption, value);
+                        }
+                    }
+                });
+            }
+
+            // Health: about the path rather than the load on it. Its own card
+            // and only when it has something in it — a machine whose probe is
+            // off has no half of it to show, and an empty plate over nothing is
+            // furniture.
+            let health = health_rows(&state.model);
+            if !health.is_empty() {
+                let inner = head_h(dpi) + health.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_LATENCY, pal.tile_green, "Health", "");
+                    for (label, value) in &health {
+                        c.row(label, value);
+                    }
+                });
             }
         }
 
-        // The Ports page's open-port list, under the four counters that summarise
-        // it. Its rows carry runtime port numbers rather than captions, so they
-        // come through here like the day list above. `section` claims a band of
-        // its own, which is safe on this page: the last `heading_row` above is
-        // on the counter row *before* this caption, and only a heading drawn on
-        // the same band could collide with it.
+        // --- Data: the totals, then the days they are made of ------------------
+        if page == DATA {
+            let m = &state.model;
+            let dpi = state.dpi;
+            c.subtitle("What this machine has moved");
+
+            // Totals: today leads because it is the one that moves, the month is
+            // the context that makes it mean something, and the plan is the
+            // context for the month. The plan is absent on a machine without
+            // one, so the card is two rows where the user has set no allowance.
+            let totals = usage_totals(&state.cfg, m);
+            if !totals.is_empty() {
+                let inner = head_h(dpi) + totals.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_USAGE, pal.tile_amber, "Usage", "");
+                    for (label, value) in &totals {
+                        c.row(label, value);
+                    }
+                });
+            }
+
+            // The day-by-day breakdown. `usage_rows` is already trimmed to the
+            // last `USAGE_ROWS` days, so this card is bounded at seven rows and
+            // needs no scrolling — which is the only reason a card can hold the
+            // list at all. No `section` caption: the card's own head names it,
+            // and a caption under a heading is the same word twice.
+            let days = usage_rows(m);
+            let body = if days.is_empty() {
+                empty_h(row_h, dpi)
+            } else {
+                days.len() as i32 * row_h
+            };
+            c.card(dpi, card_h(dpi, head_h(dpi) + body), |c| {
+                c.card_head(dpi, ICON_DATA, pal.tile_blue, "Daily breakdown", "");
+                if days.is_empty() {
+                    c.empty("No usage recorded yet.");
+                } else {
+                    for (day, bytes) in &days {
+                        c.row(day, &crate::telemetry::usage::format_size(*bytes));
+                    }
+                }
+            });
+        }
+
+        // --- Ports: the totals, then the list they summarise -------------------
         //
         // The rows are also the page's selection: clicking one aims the Stop
         // button at the process holding it, so their bands are recorded here
-        // rather than recomputed by the click path.
+        // rather than recomputed by the click path. `clear` is outside the page
+        // test because a selection on a page the reader has left is a selection
+        // by position, and the bands it names belong to the page just hidden.
         state.port_rows.clear();
         if page == PORTS {
-            // The Stop button is pinned to the foot, so the list has to stop
-            // above it — a row drawn under the button is a row that cannot be
-            // clicked. The list scrolls rather than truncating, so this is a
-            // window onto it and not a cap on it.
-            let limit = foot_button_top(h, state.dpi) - scale(S3, state.dpi);
-            if state.model.open_ports.is_empty() {
-                c.empty("No listening ports were found.");
-            } else if c.y() + row_h * 2 <= limit {
-                // Counted before the caption is drawn, because the offset has
-                // to be clamped against the room the list will actually have:
-                // a port closing between two samples shrinks the list, and an
-                // offset past its end would draw an empty page with a caption
-                // over it and no way back up.
-                let list_top = c.y() + row_h;
-                let visible = ((limit - list_top) / row_h).max(1) as usize;
-                let total = state.model.open_ports.len();
-                state.port_scroll = state.port_scroll.min(total.saturating_sub(visible));
-                let scroll = state.port_scroll;
+            let dpi = state.dpi;
+            // The Stop button is pinned to the foot, so nothing on this page may
+            // be drawn under it: a card's bottom edge behind a button is an edge
+            // the reader cannot see, and a row there is a row that cannot be
+            // clicked.
+            let limit = foot_button_top(h, dpi) - scale(S3, dpi);
+            c.subtitle("What this machine is listening on");
 
-                // The caption carries the position, so the page says which slice
-                // of the list it is showing without claiming a band of its own
-                // for the count — the list is the tall part of this page and it
-                // should keep the room.
-                if total > visible {
-                    c.section(&format!(
-                        "Open ports   {}-{} of {total}  (scroll)",
-                        scroll + 1,
-                        scroll + visible
-                    ));
-                } else {
-                    c.section("Open ports");
-                }
-                // Borrowed from the model and pushed to the state's own list in
-                // the same loop: disjoint fields of one struct, so the borrow
-                // checker has no argument with it. The pid goes in beside the
-                // rectangle because the rectangle is a *screen* position and
-                // the pid is the port — a click resolved by position alone would
-                // aim at whatever the scroll had put there.
-                for entry in state.model.open_ports.iter().skip(scroll).take(visible) {
-                    let top = c.y();
-                    state.port_rows.push((
-                        RECT {
-                            left: x0,
-                            top,
-                            right: x1,
-                            bottom: top + row_h,
-                        },
-                        entry.pid,
-                    ));
-                    if state.selected_port == Some(entry.pid) {
-                        // Behind the text, not around it: a ring drawn after the
-                        // row would clip the descenders of its own label.
-                        c.pill();
+            let counters = socket_rows(&state.model);
+            if !counters.is_empty() {
+                let inner = head_h(dpi) + counters.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_PORTS, pal.tile_blue, "Sockets", "");
+                    for (label, value) in &counters {
+                        c.row(label, value);
                     }
-                    c.row(&entry.port, &entry.owner);
+                });
+            }
+
+            let total = state.model.open_ports.len();
+            if total == 0 {
+                let body = empty_h(row_h, dpi);
+                c.card(dpi, card_h(dpi, head_h(dpi) + body), |c| {
+                    c.card_head(dpi, ICON_PORTS, pal.tile_green, "Active ports", "");
+                    c.empty("No listening ports were found.");
+                });
+            } else {
+                // Offered only when its head and two rows fit above the Stop
+                // button. Two and not one: a card whose list has been trimmed to
+                // a single port has been trimmed to a caption, and the reader
+                // learns less from it than from the window simply being too
+                // short.
+                let min_body = head_h(dpi) + 2 * row_h;
+                if c.y() + card_h(dpi, min_body) <= limit {
+                    // Counted before the card is opened, because the offset has
+                    // to be clamped against the room the list will actually
+                    // have: a port closing between two samples shrinks the list,
+                    // and an offset past its end would draw an empty plate with
+                    // a caption over it and no way back up.
+                    let body_top = c.y() + scale(CARD_PAD, dpi) + head_h(dpi);
+                    let room = limit - scale(CARD_PAD, dpi) - body_top;
+                    let visible = (room / row_h).max(2) as usize;
+                    state.port_scroll = state.port_scroll.min(total.saturating_sub(visible));
+                    let scroll = state.port_scroll;
+                    let showing = visible.min(total - scroll);
+
+                    // The position travels in the card's own right slot rather
+                    // than in a caption above the list: the list is the tall part
+                    // of this page and should keep the room, and the head is
+                    // already there.
+                    let position = if showing < total {
+                        format!("{}-{} of {total}  (scroll)", scroll + 1, scroll + showing)
+                    } else {
+                        String::new()
+                    };
+                    c.card(dpi, card_h(dpi, head_h(dpi) + showing as i32 * row_h), |c| {
+                        c.card_head(dpi, ICON_PORTS, pal.tile_green, "Active ports", &position);
+                        // The card's own inset is the list's edge now, so every
+                        // band recorded here is inside the plate. Recorded from
+                        // the inset column and not the page's: a hit test against
+                        // the page's would arm the Stop button at a port the
+                        // reader clicked the card's padding next to.
+                        let (left, right) = (c.x0, c.x1);
+                        for entry in state.model.open_ports.iter().skip(scroll).take(showing) {
+                            let top = c.y();
+                            state.port_rows.push((
+                                RECT { left, top, right, bottom: top + row_h },
+                                entry.pid,
+                            ));
+                            if state.selected_port == Some(entry.pid) {
+                                // Behind the text, not around it: a ring drawn
+                                // after the row would clip the descenders of its
+                                // own label.
+                                c.pill();
+                            }
+                            c.row(&entry.port, &entry.owner);
+                        }
+                    });
                 }
             }
-            // What the last stop did, under the list. A failed one is the
+
+            // What the last stop did, under everything. A failed one is the
             // expected case rather than the strange one — an unelevated process
-            // cannot end a service — so it is a sentence, not an alarm.
+            // cannot end a service — so it is a sentence, not an alarm. Outside
+            // the cards because it is the result of the page, not a property of
+            // any card on it.
             if let Some(notice) = &state.port_notice {
-                let colour = if notice.starts_with("stopped") {
-                    pal.muted
-                } else {
-                    pal.danger
-                };
+                let colour = if notice.starts_with("stopped") { pal.muted } else { pal.danger };
                 c.note(notice, colour);
             }
         }
@@ -451,27 +553,103 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // the history list is trimmed to the room left rather than allowed to
         // run under it.
         if page == SPEEDTEST {
-            let limit = foot_button_top(h, state.dpi) - scale(S3, state.dpi);
-            if state.model.speed_running {
-                let pct = state.model.speed_percent.min(100);
-                c.progress("Progress", &format!("{pct}%"), pct);
-            }
-            // A failure is a row, not a footnote: it is the result of the run,
-            // and it is the thing the reader opened the page to find out.
-            if !state.model.speed_error_text.is_empty() {
-                c.note(&state.model.speed_error_text, pal.danger);
-            }
-            // The caption claims a band of its own before its first row, so the
-            // check has to cover both or a caption would be left standing with
-            // no list under it.
-            if !state.model.speed_history.is_empty() && c.y() + row_h * 2 <= limit {
-                c.section("History");
-                for (when, result) in &state.model.speed_history {
-                    if c.y() + row_h > limit {
-                        break;
-                    }
-                    c.row(when, result);
+            let m = &state.model;
+            let dpi = state.dpi;
+            let limit = foot_button_top(h, dpi) - scale(S3, dpi);
+            c.subtitle("Measured throughput and ping");
+
+            let tiles = [
+                (pal.tile_blue, ICON_DOWN, m.speed_down_text.as_str(), "Download"),
+                (pal.tile_violet, ICON_UP, m.speed_up_text.as_str(), "Upload"),
+                (pal.tile_amber, ICON_LATENCY, m.speed_latency_text.as_str(), "Latency"),
+            ];
+            let live: Vec<_> = tiles.iter().filter(|t| !t.2.is_empty()).collect();
+            // Nothing has happened yet: no run in flight, no failure, no result.
+            // Asked as one question rather than as three so the card's height and
+            // the card's body cannot answer it differently.
+            let idle = !m.speed_running && m.speed_error_text.is_empty() && live.is_empty();
+
+            let readings = if idle {
+                empty_h(row_h, dpi)
+            } else if live.len() == 3 {
+                lane_h(dpi)
+            } else {
+                live.len() as i32 * row_h
+            };
+            // The three parts are each exactly one band: the progress row
+            // carries its own track inside its band, the failure note is a line,
+            // and the readings are a lane or a run of rows. Summed as terms, so a
+            // part that disappears takes its height with it.
+            let body = head_h(dpi)
+                + if m.speed_running { row_h } else { 0 }
+                + if m.speed_error_text.is_empty() { 0 } else { row_h }
+                + readings;
+
+            c.card(dpi, card_h(dpi, body), |c| {
+                // The head's right slot is where the state goes: the phase while
+                // a run is in flight, the time it finished once it is done. It is
+                // the one place on the card that can change without moving
+                // anything below it.
+                let right = if m.speed_running {
+                    m.speed_phase_text.clone()
+                } else if m.speed_when_text.is_empty() {
+                    String::new()
+                } else {
+                    format!("Ran {}", m.speed_when_text)
+                };
+                c.card_head(dpi, ICON_SPEED, pal.tile_blue, "Performance", &right);
+
+                if m.speed_running {
+                    // The phase is the row's *label*, not a row of its own:
+                    // "which phase" and "how far through it" are one reading, and
+                    // one band is what they get.
+                    let pct = m.speed_percent.min(100);
+                    let label = if m.speed_phase_text.is_empty() {
+                        "Progress"
+                    } else {
+                        m.speed_phase_text.as_str()
+                    };
+                    c.progress(label, &format!("{pct}%"), pct);
                 }
+                // A failure is a line in the card, not a footnote under it: it is
+                // the result of the run, and it is the thing the reader opened
+                // the page to find out.
+                if !m.speed_error_text.is_empty() {
+                    c.note(&m.speed_error_text, pal.danger);
+                }
+                if idle {
+                    c.empty("No run yet. Press Run test to start.");
+                } else if live.len() == 3 {
+                    c.stat_lane(dpi, tiles);
+                } else {
+                    for (_, _, value, caption) in &live {
+                        c.row(caption, value);
+                    }
+                }
+            });
+
+            // History, trimmed *before* the card is opened rather than during
+            // it: a card's height is the caller's, so the list has to know how
+            // many rows it will have before the plate under them is drawn. The
+            // room is what is left above the Run button once this card's own
+            // padding and head are off it.
+            let room = limit - c.y() - scale(2 * CARD_PAD, dpi) - head_h(dpi);
+            let fits = ((room / row_h).max(0) as usize).min(m.speed_history.len());
+            if m.speed_history.is_empty() {
+                let body = empty_h(row_h, dpi);
+                if c.y() + card_h(dpi, head_h(dpi) + body) <= limit {
+                    c.card(dpi, card_h(dpi, head_h(dpi) + body), |c| {
+                        c.card_head(dpi, ICON_TRAFFIC, pal.tile_violet, "Runs", "");
+                        c.empty("No runs recorded yet.");
+                    });
+                }
+            } else if fits > 0 {
+                c.card(dpi, card_h(dpi, head_h(dpi) + fits as i32 * row_h), |c| {
+                    c.card_head(dpi, ICON_TRAFFIC, pal.tile_violet, "Runs", "");
+                    for (when, result) in m.speed_history.iter().take(fits) {
+                        c.row(when, result);
+                    }
+                });
             }
         }
 
@@ -482,38 +660,29 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // The button itself is a real child window, placed at the foot by
         // `layout_settings`.
         if page == STOPWATCH {
+            let dpi = state.dpi;
             let running = state.watch.is_running();
             let resting = !running && state.watch.elapsed().is_zero();
-            // `section`, not `row`: the caption takes a band of its own and
-            // rules off from it, so a face taller than a row has somewhere to
-            // stand. A `row` would put the label beside a value already drawn
-            // large underneath it, which is the same number twice.
-            c.section("Elapsed");
+            c.subtitle("Elapsed time");
+
             let digits = state.watch.text(running);
-            // The clock goes through `draw` rather than a `Canvas` method: its
-            // face is taller than a row, and the canvas would clip it to the
-            // band's own height. One absolute rectangle is simpler than a
-            // component whose only caller has a different band size.
-            SetTextColor(dc, pal.text);
-            draw(
-                dc,
-                fonts.clock,
-                &digits,
-                x0,
-                c.y() + scale(S3, state.dpi),
-                x1,
-                DT_LEFT,
-            );
-            // The clock's own height, not a row's: a face this size would be
-            // clipped by a band laid out for one line of body text, and the
-            // hint below it would then be drawn through it.
-            c.space(scale(CLOCK_EXTRA + 2 * S2, state.dpi));
-            // The hint goes at the foot, under the buttons, rather than beside
-            // the clock: at the top it would be read as a caption for the
-            // zero it is standing next to.
-            if resting {
-                c.empty("Press Start to begin.");
-            }
+            // The hint is a row of the card and not a line under it: when there
+            // is nothing to read, the card is what remains, and a card holding a
+            // zero and nothing else says less than the sentence that tells you
+            // what to press.
+            let body = head_h(dpi) + hero_h(dpi) + if resting { empty_h(row_h, dpi) } else { 0 };
+            c.card(dpi, card_h(dpi, body), |c| {
+                c.card_head(dpi, ICON_STOPWATCH, pal.tile_violet, "Stopwatch", "");
+                // The digits go through the hero and not through a row: the face
+                // is `CLOCK_EXTRA` above the body, and a band laid out for one
+                // line of body text would clip them. The clock is *also* the
+                // control this page is named for, which is why the card and the
+                // Start button are the only two things on it.
+                c.hero(dpi, &digits);
+                if resting {
+                    c.empty("Press Start to begin.");
+                }
+            });
         }
 
         // The Timer page. First the four captions, on the bands
@@ -522,92 +691,155 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // `FIELD_DROP`, because a control placed by one function and labelled by
         // another has only those constants keeping them together.
         if page == TIMER {
+            let dpi = state.dpi;
+            // The four captions, on the bands `layout_settings` puts their
+            // controls on — the same arithmetic as the Settings page, from the
+            // same `form_top` and the same `FIELD_DROP`, because a control
+            // placed by one function and labelled by another has only those
+            // constants keeping them together.
             for label in TIMER_LABELS.iter() {
-                // Every row here has a control beside its caption, so every row
-                // takes the drop — the one difference from the Settings page,
-                // whose tile grid alone has none.
-                c.row_aligned(label, "", scale(FIELD_DROP, state.dpi));
+                c.row_aligned(label, "", scale(FIELD_DROP, dpi));
             }
 
-            // What the four above add up to, under them. Read from the config and
-            // not from the controls, so the line can only ever name an instant
-            // that was actually saved — a typed `23:00` that was never armed is
-            // not a timer, and the page must not draw it as one.
-            c.section("Armed for");
-            if !state.cfg.timer.enabled {
-                c.empty("Off. Press Arm to switch it on.");
-            } else if let Some(when) = power::fire_at(&state.cfg.timer, &power::now()) {
-                // The instant in the clock's own face, as on the Stopwatch
-                // page: it is the number this page exists to show, and a row
-                // would clip a face taller than a band of body text.
-                let stamp = power::format_stamp(&when);
-                SetTextColor(dc, pal.text);
-                draw(dc, fonts.clock, &stamp, x0, c.y() + scale(S3, state.dpi), x1, DT_LEFT);
-                c.space(scale(CLOCK_EXTRA + 2 * S2, state.dpi));
-                // What and how long, under it. The countdown is recomputed from
-                // the same instant the watcher grades, so the number on screen
-                // and the number in the confirmation are one number.
+            // What the four above add up to, in a card under them. Read from
+            // the config and not from the controls, so the card can only ever
+            // name an instant that was actually saved — a typed `23:00` that was
+            // never armed is not a timer, and the page must not draw it as one.
+            let t = state.cfg.timer.clone();
+            let action = power::action_of(&t).label();
+            let target = if t.enabled { power::fire_at(&t, &power::now()) } else { None };
+            let countdown = target.map(|when| {
                 let secs = power::seconds_until(&when, &power::now());
-                c.note(
-                    &format!(
-                        "{} in {}",
-                        power::action_of(&state.cfg.timer).label(),
-                        power::format_countdown(secs)
-                    ),
-                    pal.muted,
-                );
+                (power::format_stamp(&when), power::format_countdown(secs))
+            });
+
+            // The instant in the clock's own face, as on the Stopwatch page: it
+            // is the number this card exists to show, and a row would clip a
+            // face taller than a band of body text. The countdown under it is
+            // recomputed from the same instant the watcher grades, so the number
+            // on screen and the number in the confirmation are one number.
+            let body = head_h(dpi)
+                + match &countdown {
+                    Some(_) => hero_h(dpi) + row_h,
+                    None => empty_h(row_h, dpi),
+                };
+            // Only when it clears the Arm button. A card whose bottom edge is
+            // behind a child window is a card the reader sees the top half of,
+            // and the window it happens in is the short one — where the form
+            // above already fills the page and the card is the part that can go.
+            if c.y() + card_h(dpi, body) <= foot_button_top(h, dpi) {
+                c.card(dpi, card_h(dpi, body), |c| {
+                    // The right slot carries the state, which is the one thing
+                    // here that changes without the rest of the card moving:
+                    // what it will do, or that it is off.
+                    let right = if t.enabled { action } else { "Off" };
+                    c.card_head(dpi, ICON_TIMER, pal.tile_amber, "Power timer", right);
+                    match &countdown {
+                        Some((stamp, left)) => {
+                            c.hero(dpi, stamp);
+                            // The action is already in the head, so the row does
+                            // not repeat it: "Sleep" twice on one card is one
+                            // word too many.
+                            c.row("Fires in", left);
+                        }
+                        None if t.enabled => c.empty("No target time set."),
+                        None => c.empty("Off. Press Arm to switch it on."),
+                    }
+                });
             }
         }
 
-        // The Settings page's captions. They sit on the same bands as the
-        // controls `layout_settings` places, from the same constants, so a row
-        // and its caption cannot drift even though two functions draw them.
+        // The Settings page: a header, then two cards. The controls are native
+        // children and are placed by `layout_settings`; every band they sit on
+        // is claimed here either as a caption or as deliberate blank space, so
+        // the cards' heights and the controls' rows are one expression seen from
+        // two sides.
         if page == SETTINGS {
-            for (row, label) in SET_ROW_LABELS.iter().enumerate() {
-                if row == ROW_DIVIDER {
-                    // The only mark on this page that is neither a control nor
-                    // a caption. It claims a band of its own rather than being
-                    // drawn across the grid's last row, because every row here
-                    // is placed by index: a rule that moved nothing would be a
-                    // rule drawn through the Refresh caption under it.
-                    c.rule();
-                } else if label.is_empty() {
-                    // The tile grid's row 0. A checkbox carries its own label,
-                    // so the band is skipped rather than closed up: the controls
-                    // are placed by row index, and the captions have to keep
-                    // step. Only the first row comes through here — the grid's
-                    // other three sit on the form's own rows, whose captions are
-                    // drawn behind their controls.
+            let dpi = state.dpi;
+            let form = &state.settings;
+
+            c.subtitle(PAGE_SUBTITLE);
+
+            // --- card 1: the tile grid ------------------------------------------
+            c.card(dpi, tiles_card_h(dpi), |c| {
+                c.card_head(dpi, ICON_TILES, pal.tile_blue, TILES_CARD_TITLE, TILES_BADGE);
+                // The checkboxes carry their own labels, so nothing is drawn on
+                // these bands — they are claimed so that the card is exactly as
+                // tall as the grid `layout_settings` walks.
+                for _ in 0..TILE_ROWS {
                     c.space(row_h);
-                } else if row == ROW_APPEARANCE {
-                    // The one caption here that leads with a glyph, and the one
-                    // that names the mode the button beside it switches *to*
-                    // rather than the setting it edits. Read from the field
-                    // under it and not from the saved config, so a background
-                    // the user has picked but not yet saved already decides
-                    // which way the toggle goes.
-                    let (next_dark, caption, _, _) =
-                        crate::ui::design::next_preset(&state.settings.background());
-                    c.row_glyph(
-                        crate::ui::design::theme_glyph(next_dark),
-                        caption,
-                        scale(FIELD_DROP, state.dpi),
-                    );
-                } else {
-                    // The caption drops to the middle of the field beside it:
-                    // a native field centres its own text while a row draws
-                    // from the top of its band, and at this one place on the
-                    // page a caption sits *beside* a control rather than above
-                    // it, leaving the two five pixels apart — enough for the
-                    // label to read as a heading for the row above it.
-                    c.row_aligned(label, "", field_drop(row, state.dpi));
                 }
-            }
-            // The notice sits under the buttons rather than beside them: it is
-            // the result of the whole page, not of either button, and it needs
-            // the full width to name a path that did not write.
+            });
+
+            // --- card 2: the form -----------------------------------------------
+            let ix0 = card_inner_x0(x0, dpi);
+            let field_x = ix0 + scale(LABEL_W, dpi);
+            let field_w = scale(FIELD_W, dpi);
+            let gap = scale(FIELD_GAP, dpi);
+            let ctl_h = scale(CTL_H, dpi);
+            let nudge = scale(VALUE_OFFSET, dpi);
+            c.card(dpi, prefs_card_h(dpi), |c| {
+                c.card_head(dpi, ICON_TUNE, pal.tile_violet, PREFS_CARD_TITLE, "");
+                for (row, label) in SET_ROW_LABELS.iter().enumerate() {
+                    let top = c.y();
+                    if label.is_empty() {
+                        // No card-2 row is blank today, but the page is a table
+                        // and the next row added to it should not have to know
+                        // that. A blank caption claims its band and nothing else.
+                        c.space(row_h);
+                        continue;
+                    }
+                    if row == ROW_APPEARANCE {
+                        // The one caption here that leads with a glyph, and the
+                        // one that names the mode the button beside it switches
+                        // *to* rather than the setting it edits. Read from the
+                        // field under it and not from the saved config, so a
+                        // background the user has picked but not yet saved
+                        // already decides which way the toggle goes.
+                        let (next_dark, caption, _, _) =
+                            crate::ui::design::next_preset(&form.background());
+                        c.row_glyph(
+                            crate::ui::design::theme_glyph(next_dark),
+                            caption,
+                            scale(FIELD_DROP, dpi),
+                        );
+                        continue;
+                    }
+                    // The caption drops to the middle of the field beside it: a
+                    // native field centres its own text while a row draws from
+                    // the top of its band, and at this one place on the page a
+                    // caption sits *beside* a control rather than above it.
+                    c.row_aligned(label, "", scale(FIELD_DROP, dpi));
+                    // The three colour rows preview what is typed beside them,
+                    // painted between the box and the Pick button — the column
+                    // `layout_settings` leaves free for exactly this. On the band
+                    // the caption just claimed, so the swatch moves with the row
+                    // and not with a sum written here. A frame first: a black
+                    // swatch on a dark card is a swatch that vanished.
+                    if let Some(colour) = swatch_colour(row, form) {
+                        let r = swatch_rect(field_x, field_w, gap, top + nudge, ctl_h, dpi);
+                        let radius = scale(RADIUS, dpi) / 2;
+                        rounded_fill(c.dc, r, radius, pal.border);
+                        rounded_fill(
+                            c.dc,
+                            RECT {
+                                left: r.left + 1,
+                                top: r.top + 1,
+                                right: r.right - 1,
+                                bottom: r.bottom - 1,
+                            },
+                            radius,
+                            colour,
+                        );
+                    }
+                }
+            });
+
+            // The notice sits under the second card rather than beside a button:
+            // it is the result of the whole page, and it needs the full width to
+            // name a path that did not write.
             if let Some(notice) = &state.notice {
-                let colour = if notice.starts_with("saved") {
+                let colour = if notice.starts_with("saved") || notice.starts_with("reset") {
                     pal.text
                 } else {
                     pal.danger
@@ -636,6 +868,58 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                 state.cfg.interval_ms,
                 state.dpi,
             );
+        }
+
+        // The edit boxes' wells, after the page and before the popup: an `EDIT`
+        // is the one control class that cannot be owner-drawn, so its rounded
+        // border is painted here on the rectangle the control already has. After
+        // the page, because the well is a shape cut into the card the walk just
+        // drew; before the popup, because a field outlined through the scrim
+        // would be the one thing on the window the modal fails to cover.
+        //
+        // Read from the controls rather than from `layout_settings`' arithmetic:
+        // there is one placement of a field in this program and it is the one
+        // the window made, so re-deriving the rectangle here would be a second
+        // answer that could disagree by a pixel and look like a rendering fault.
+        let wells = crate::ui::settings::EDIT_IDS.map(|id| {
+            // SAFETY: `hwnd` is our own window and `id` names our own child; the
+            // rect and points are written only when the calls succeed.
+            let ctl = match GetDlgItem(Some(hwnd), id) {
+                Ok(ctl) => ctl,
+                Err(_) => return None,
+            };
+            // A field on another page is still laid out but hidden, and a well
+            // painted for a control nobody can see is a plate on the wrong
+            // page's rows.
+            if !IsWindowVisible(ctl).as_bool() {
+                return None;
+            }
+            let mut r = RECT::default();
+            if GetWindowRect(ctl, &mut r).is_err() {
+                return None;
+            }
+            // Screen pixels to client pixels: the DC is the window's, so a well
+            // drawn from the screen rect would be off by the frame's own origin.
+            let mut pts = [POINT { x: r.left, y: r.top }, POINT { x: r.right, y: r.bottom }];
+            MapWindowPoints(None, Some(hwnd), &mut pts);
+            Some(RECT {
+                left: pts[0].x,
+                top: pts[0].y,
+                right: pts[1].x,
+                bottom: pts[1].y,
+            })
+        });
+        for mut r in wells.into_iter().flatten() {
+            // Grown by the ring `FIELD_INSET` leaves visible: the control covers
+            // its own rectangle, so the outline has to stand *outside* it to be
+            // seen at all, and the fill under it is what the control's own
+            // background brush agrees with.
+            let inset = scale(FIELD_INSET, state.dpi);
+            r.left -= inset;
+            r.top -= inset;
+            r.right += inset;
+            r.bottom += inset;
+            crate::ui::components::well(dc, r, &pal, state.dpi);
         }
 
         // The confirmation popup, last and over everything. It dims the whole

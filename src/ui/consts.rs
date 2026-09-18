@@ -1,6 +1,6 @@
 //! Window class, control ids and the metrics the controls are built from.
 
-use windows::core::{PCWSTR, w};
+use windows::core::{w, PCWSTR};
 
 /// The window class, registered on first show and reused after.
 pub(crate) const CLASS: PCWSTR = w!("ArboTrayWindow");
@@ -101,6 +101,10 @@ pub(crate) const SET_PICK_ALERT: i32 = SET_ID_BASE + 26;
 /// wrong.
 pub(crate) const SET_THEME: i32 = SET_ID_BASE + 32;
 
+/// The header's Reset to Default button. A page-wide action, not a field, so
+/// its own id: it acts on the whole form rather than being laid out with it.
+pub(crate) const SET_DEFAULTS: i32 = SET_ID_BASE + 33;
+
 /// The Timer page's five, in the order the page reads them.
 ///
 /// A page of their own rather than rows on the Settings form, because the arm
@@ -119,16 +123,10 @@ pub(crate) const SET_TIMER_ARM: i32 = SET_ID_BASE + 31;
 /// `WM_ENABLE` is the one control message the `WindowsAndMessaging` bindings
 /// do not expose as a named constant, and `EnableWindow` is not there either.
 /// It is a documented, stable message number, so it is spelled out rather than
-/// pulling in `Win32_UI_Controls` for it.
+/// imported. `BST_CHECKED` used to sit beside it for the same reason and is gone
+/// with `BM_GETCHECK`: the checkboxes are owner-drawn now, so the system keeps no
+/// check state to ask about — `settings::Checks` is where it lives instead.
 pub(crate) const WM_ENABLE: u32 = 0x000A;
-
-/// The button check state `BM_GETCHECK` returns for a ticked checkbox.
-///
-/// `BST_CHECKED` lives in `Win32_UI_Controls` with the rest of the owner-draw
-/// machinery, and enabling that feature to read one `1` is not worth it. The
-/// unchecked and indeterminate states are `0` and `2`; only the first two are
-/// used here, and the unchecked case is `0`, so nothing spells it out.
-pub(crate) const BST_CHECKED: isize = 1;
 
 /// Text height of a settings control at 96 DPI, and the nudge that lines its
 /// text up with the painted rows. A native control centres its text in its own

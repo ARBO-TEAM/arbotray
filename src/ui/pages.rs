@@ -1,10 +1,11 @@
-//! Which rows each page shows, and the Data page's day list.
+//! What each page shows inside its cards, and the Data page's day list.
 
+use crate::config::Config;
 use crate::taskbar::TrayModel;
 
 /// The pages, in the order the list shows them. Their indices are the page
 /// numbers used throughout, so the constants below name the slots rather than
-/// leaving magic numbers in the row functions.
+/// leaving magic numbers in the card tables.
 ///
 /// `Settings` is **appended**. These indices are positional, so inserting it
 /// anywhere but the end would renumber every page after it — the labels would
@@ -31,191 +32,129 @@ pub(crate) const TIMER: usize = 7;
 pub(crate) const SETTINGS: usize = 8;
 
 // --- pages ----------------------------------------------------------------
+//
+// There is no `page_has_cards` predicate any more. It existed to keep the
+// painter's generic row loop and the card arms from both drawing a page, and
+// the row loop is gone: the painter draws each page from its own `page == X`
+// arm, so a page that grew a card could not also be walked as rows. What it
+// guarded is now structural rather than asserted.
 
-/// The rows for one page, in order, skipping anything switched off.
+// --- card contents --------------------------------------------------------
+//
+// The tables below are what each carded page puts *inside* its cards. They share
+// a shape — a label and its value, in the order the card reads them — and a
+// rule: an empty value is no row at all, rather than a caption standing beside
+// nothing.
+
+/// The Network page's identity card: which network this machine is on, and
+/// which adapter is carrying it.
 ///
-/// Splitting them is the point of the sidebar: the traffic numbers are what
-/// people open this for, so they lead the overview, and the adapter and
-/// hardware detail moves one click away instead of burying them.
-pub(crate) fn page_rows(page: usize, model: &TrayModel) -> Vec<(&'static str, String)> {
+/// Ordered identity-first: the card leads with the SSID when there is one, then
+/// the adapter and the addresses that belong to it, because "which network am I
+/// on" is the question the card is opened to answer; the gateway follows the IP
+/// so the two ends of the connection read as a pair.
+pub(crate) fn connection_rows(model: &TrayModel) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
     let mut push = |label: &'static str, text: &str| {
         if !text.is_empty() {
             out.push((label, text.to_string()));
         }
     };
-    match page {
-        NETWORK => {
-            if let Some(name) = &model.wifi_name {
-                push("Network", name);
-            }
-            // The interface first, then what is on it: "which adapter is this"
-            // is the question every address below is an answer to, and the
-            // local IP sits directly above the gateway so the two ends of the
-            // connection read as a pair.
-            push("Adapter", &model.adapter_text);
-            push("IP", &model.ip_text);
-            push("DNS", &model.dns_text);
-            push("Wi-Fi", &model.wifi_text);
-            push("Download", &model.down_text);
-            push("Upload", &model.up_text);
-            push("Gateway", &model.gateway_text);
-            push("Latency", &model.latency_text);
-            // Right after the gateway it depends on: they are read together to
-            // tell a local fault from a provider one.
-            push("Internet", &model.internet_text);
-            push("Loss", &model.loss_text);
-        }
-        // Ordered as the questions get asked: what this machine is, what is
-        // running in it, and how long it has been up. The two live metrics lead
-        // because they are the ones that move — everything under them is a
-        // reading of something that does not.
-        SYSTEM => {
-            push("CPU", &model.cpu_text);
-            push("RAM", &model.ram_text);
-            push("Processor", &model.cpu_name_text);
-            push("Cores", &model.cores_text);
-            push("Graphics", &model.gpu_text);
-            push("Computername", &model.computer_text);
-            push("Windows", &model.windows_text);
-            push("Uptime", &model.uptime_text);
-            push("Battery", &model.battery_text);
-            push("Power", &model.power_text);
-            // Last, and always there: this is the row a user reads to find out
-            // which build they are on, and the one an upgrade prompt is checked
-            // against by hand when the automatic check is unavailable. Its value
-            // carries the newer version when one was found, so "you are on 0.7.1"
-            // and "0.8.0 exists" are one line rather than two.
-            push("Version", &model.version_text);
-        }
-        DATA => {
-            push("Today", &model.usage_text);
-            // The caption carries the caveat, not the number. When the file no
-            // longer reaches back to the first of the month the sum is of the
-            // recent past only, and "Month so far" says so where a reader will
-            // actually look.
-            push(month_label(model), &model.month_text);
-        }
-        // Ordered widest first: what the machine is listening on, then what is
-        // actually talking, then the connectionless sockets. The port list
-        // itself is drawn after these by the painter, because its labels are
-        // runtime port numbers rather than captions.
-        PORTS => {
-            push("Listening", &model.listeners_text);
-            push("Established", &model.established_text);
-            push("UDP bound", &model.udp_text);
-            push("Processes", &model.port_owners_text);
-        }
-        // The reading leads and the running state follows it, so the numbers a
-        // reader came for never move down the page when a test starts.
-        SPEEDTEST => {
-            push("Download", &model.speed_down_text);
-            push("Upload", &model.speed_up_text);
-            push("Latency", &model.speed_latency_text);
-            push("Status", &model.speed_phase_text);
-        }
-        // The Stopwatch page has no reading on it either: its one number is
-        // drawn by the painter, in the same place the button that starts it
-        // sits, because a clock and the control that runs it are one thing.
-        // Without its own arm it would fall through to the overview below.
-        STOPWATCH => {}
-        // The Timer page reads like the Stopwatch one: what it has to say is a
-        // clock and a state, drawn by the painter under the controls that set
-        // them. Nothing here, and for the same reason.
-        TIMER => {}
-        // The Settings page has no metric on it: every line it shows is a
-        // caption from `SET_ROW_LABELS` beside a control. Without this arm it
-        // would fall through to the overview below and paint the traffic
-        // figures in the gaps between its own fields.
-        SETTINGS => {}
-        // OVERVIEW, and the fallback for an index that cannot happen: showing
-        // the traffic is always better than showing nothing.
-        _ => {
-            push("Download", &model.down_text);
-            push("Upload", &model.up_text);
-            push("Latency", &model.latency_text);
-            push("CPU", &model.cpu_text);
-            push("RAM", &model.ram_text);
-        }
+    if let Some(name) = &model.wifi_name {
+        push("Network", name);
     }
+    push("Adapter", &model.adapter_text);
+    push("IP", &model.ip_text);
+    push("Gateway", &model.gateway_text);
+    push("DNS", &model.dns_text);
+    push("Wi-Fi", &model.wifi_text);
     out
 }
 
-/// The heading a row opens, or `None` for a row that continues the group above
-/// it.
+/// The Network page's health card: whether the far end answers, and how much of
+/// what was sent had to be sent again.
 ///
-/// A metric page is a wall of label-value pairs, and ten of them with nothing
-/// between them is a wall ten rows tall. Grouping turns each page into a few
-/// short blocks — and it costs nothing, because a heading is drawn *at* the row
-/// it names rather than above it. Nothing moves, so the order a page reads in
-/// cannot change because of where a caption went.
-///
-/// Each group is anchored on its own first row, so a group whose first row is
-/// switched off — or blank, because the collector had nothing to say — has no
-/// header at all, rather than leaving one hanging over unrelated rows.
-///
-/// `prev` is the heading the page has already drawn, and is what lets **two**
-/// rows open one group: the SSID row and the adapter row both begin
-/// "Connection", and which of them is present depends on whether the machine is
-/// on Wi-Fi. Whichever comes first draws the heading and the other continues
-/// the group it opened; without this the same heading would be drawn on two
-/// adjacent rows.
-pub(crate) fn page_section(
-    page: usize,
-    label: &str,
-    prev: Option<&'static str>,
-) -> Option<&'static str> {
-    let name = match page {
-        NETWORK => match label {
-            // Both open "Connection", deliberately — see above.
-            "Network" | "Adapter" => Some("Connection"),
-            "Wi-Fi" => Some("Signal"),
-            "Download" => Some("Traffic"),
-            "Gateway" => Some("Health"),
-            _ => None,
-        },
-        SYSTEM => match label {
-            "CPU" => Some("Live"),
-            "Processor" => Some("Hardware"),
-            "Computername" => Some("This machine"),
-            "Battery" => Some("Power"),
-            _ => None,
-        },
-        // The day list under these two has a standalone caption of its own
-        // (`"Recent days"`, in the painter), because its rows are runtime dates
-        // rather than page rows. This is the level above it: the totals the
-        // list adds up to.
-        DATA => match label {
-            "Today" => Some("Totals"),
-            _ => None,
-        },
-        // Four counters of the same kind, so one heading rather than four
-        // captions: the open-port list below them is the detail this group is
-        // the summary of.
-        PORTS => match label {
-            "Listening" => Some("Sockets"),
-            _ => None,
-        },
-        SPEEDTEST => match label {
-            "Download" => Some("Result"),
-            _ => None,
-        },
-        // OVERVIEW, and the fallback for an index that cannot happen — the same
-        // split the row function makes, for the same reason.
-        _ => match label {
-            "Download" => Some("Traffic"),
-            "CPU" => Some("Usage"),
-            _ => None,
-        },
+/// The two are read together — a lossy link and a dead one look the same from a
+/// single latency number — which is why they are one card and not two rows on
+/// the identity card above.
+pub(crate) fn health_rows(model: &TrayModel) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |label: &'static str, text: &str| {
+        if !text.is_empty() {
+            out.push((label, text.to_string()));
+        }
     };
-    // A heading already drawn on the row above is a continuation, not a new
-    // group. The only table with two anchors for one name needs this; keeping
-    // the rule here rather than in each table means the next one cannot forget
-    // it and silently draw the same caption on two adjacent rows.
-    match name {
-        Some(n) if prev == Some(n) => None,
-        other => other,
+    push("Internet", &model.internet_text);
+    push("Loss", &model.loss_text);
+    out
+}
+
+/// The Ports page's socket counters, widest first: what the machine is listening
+/// on, then what is actually talking, then the connectionless sockets, then how
+/// many processes that adds up to.
+///
+/// The open-port list itself is drawn after these by the painter, because its
+/// labels are runtime port numbers rather than the captions this table can hold.
+pub(crate) fn socket_rows(model: &TrayModel) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |label: &'static str, text: &str| {
+        if !text.is_empty() {
+            out.push((label, text.to_string()));
+        }
+    };
+    push("Listening", &model.listeners_text);
+    push("Established", &model.established_text);
+    push("UDP bound", &model.udp_text);
+    push("Processes", &model.port_owners_text);
+    out
+}
+
+/// The Data page's plan row, or `None` when there is no plan to report.
+///
+/// `quota_gb <= 0.0` is the config's own documented "no plan" value, so it hides
+/// the row entirely rather than drawing `0 GB` — the same test `quota_pct` makes
+/// before it will produce a percentage, so the row and the bar that would read
+/// off it cannot disagree about whether a plan exists.
+///
+/// The over-plan case is said in the row's own value rather than by colouring
+/// it: the window already turns red top to bottom when the quota is blown (see
+/// `Canvas::emphasise`), and a second red mark inside a red page says nothing
+/// the first one did not.
+pub(crate) fn plan_row(cfg: &Config, model: &TrayModel) -> Option<(&'static str, String)> {
+    if cfg.quota_gb <= 0.0 {
+        return None;
     }
+    let gb = cfg.quota_gb;
+    Some((
+        "Plan",
+        if model.quota_alert {
+            format!("{gb} GB \u{2014} over plan")
+        } else {
+            format!("{gb} GB")
+        },
+    ))
+}
+
+/// The Data page's totals card: today, the month so far, and the plan they are
+/// both a fraction of.
+///
+/// The month's caption is `month_label`, which carries the caveat rather than
+/// the number — when the usage file no longer reaches back to the first of the
+/// month the sum is of the recent past only, and "Month so far" says so where a
+/// reader will actually look. Empty text means rowless, so a counter that has
+/// not seen a day yet contributes no caption.
+pub(crate) fn usage_totals(cfg: &Config, model: &TrayModel) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    if !model.usage_text.is_empty() {
+        out.push(("Today", model.usage_text.clone()));
+    }
+    if !model.month_text.is_empty() {
+        out.push((month_label(model), model.month_text.clone()));
+    }
+    if let Some(plan) = plan_row(cfg, model) {
+        out.push(plan);
+    }
+    out
 }
 
 /// How many trailing days the Data page lists. The whole retention window is
@@ -225,8 +164,8 @@ pub(crate) const USAGE_ROWS: usize = 7;
 
 /// The Data page's day rows, oldest first, as `(MM-DD, total)`.
 ///
-/// Rendered here rather than through `page_rows` because their labels are
-/// runtime dates, not the `&'static str` captions the metric pages use.
+/// Rendered here rather than as a typed table because their labels are runtime
+/// dates, not the `&'static str` captions the metric rows use.
 pub(crate) fn usage_rows(model: &TrayModel) -> Vec<(String, u64)> {
     let skip = model.usage_days.len().saturating_sub(USAGE_ROWS);
     model
@@ -253,7 +192,7 @@ pub(crate) fn month_label(model: &TrayModel) -> &'static str {
 ///
 /// Shared by the Overview and System meters, so one string never means two
 /// things on two pages. It parses model strings, not GDI, which is why it lives
-/// with the rows rather than with the components.
+/// beside the card tables rather than with the components.
 pub(crate) fn pct_of(text: &str) -> f32 {
     text.trim()
         .strip_suffix('%')
@@ -275,36 +214,6 @@ pub(crate) fn page_shows_graph(page: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Walk a page the way the painter does — threading the last heading drawn
-    /// into the next `page_section` — and return the pairs the painter would
-    /// draw, as `(Option<heading>, label)`.
-    fn painted(
-        page: usize,
-        model: &crate::taskbar::TrayModel,
-    ) -> Vec<(Option<&'static str>, &'static str)> {
-        let mut drawn: Option<&'static str> = None;
-        page_rows(page, model)
-            .into_iter()
-            .map(|(label, _)| {
-                let head = page_section(page, label, drawn);
-                if head.is_some() {
-                    drawn = head;
-                }
-                (head, label)
-            })
-            .collect()
-    }
-
-    /// The headings a page ends up with, in the order it draws them. This is
-    /// the check that the `prev` rule works: the two `Connection` anchors must
-    /// collapse to one heading when both rows are present.
-    fn headings(page: usize) -> Vec<&'static str> {
-        painted(page, &full())
-            .into_iter()
-            .filter_map(|(head, _)| head)
-            .collect()
-    }
 
     /// A model with every field filled, so a page's own ordering shows.
     fn full() -> crate::taskbar::TrayModel {
@@ -347,165 +256,115 @@ mod tests {
         }
     }
 
-    /// The anchor tables are string matches, and a typo in one is a heading that
-    /// silently never draws — the rows still appear, just ungrouped, which looks
-    /// like a missing feature rather than a misspelled literal.
-    ///
-    /// The labels themselves are pinned exactly by the ordering tests in
-    /// `ui::tests`, so between them a renamed row fails there and a renamed
-    /// anchor fails here. What is checked here is the shape the headings have to
-    /// keep: every page grouped, no heading used twice on one page, and the
-    /// first row of a page always under a heading — a page that opens ungrouped
-    /// and then starts grouping halfway down reads as a mistake.
-    #[test]
-    fn every_section_is_anchored_on_a_row_that_exists() {
-        for page in 0..PAGES.len() {
-            if page_rows(page, &full()).is_empty() {
-                // No rows at all, so nothing to group: Settings is a caption
-                // per control drawn by the layout, and the Stopwatch is a clock
-                // drawn by the painter. Asked as the question the assertions
-                // below actually need rather than as a list of page names,
-                // because a page with no rows fails them for the right reason
-                // and adding one should not silently skip them.
-                continue;
-            }
-            let mut heads = headings(page);
-            assert!(!heads.is_empty(), "{} has no groups", PAGES[page]);
-            assert!(
-                painted(page, &full())[0].0.is_some(),
-                "{} opens ungrouped",
-                PAGES[page]
-            );
-            let found = heads.len();
-            heads.sort_unstable();
-            heads.dedup();
-            assert_eq!(found, heads.len(), "{} repeats a heading", PAGES[page]);
-        }
-    }
+    // The anchor-heading tests that stood here — `every_section_is_anchored_on_a_row_that_exists`,
+    // `no_heading_is_spelled_for_a_row_that_cannot_reach_it`,
+    // `the_doubled_anchor_draws_one_heading_not_two`,
+    // `every_page_groups_its_rows_in_the_order_it_reads_them` and
+    // `a_switched_off_metric_does_not_leave_a_header_over_nothing` — pinned the
+    // `page_section` anchor table, and went with it: grouping is drawn on the
+    // cards now, each group named by its own `card_head` rather than by an
+    // anchor table. The contract they guarded is checked on the rows the cards
+    // actually draw: `the_connection_card_*`,
+    // `the_socket_counters_come_back_in_reading_order`,
+    // `the_usage_totals_carry_a_plan_row_only_when_a_plan_is_set` and
+    // `a_health_card_with_nothing_to_report_has_no_rows`.
+    //
+    // `the_system_page_names_what_this_machine_is` went with them and is not
+    // replaced here: the System card builds its identity rows inline in
+    // `paint.rs` — "Computer", "Windows", "Uptime", "Version", in that order —
+    // so nothing reachable from this file can assert their order, and the page's
+    // own test in `paint.rs` is what pins it.
+    //
+    // `every_carded_page_is_also_walked_as_rows` stood here too, pinning the
+    // exclusivity `page_has_cards` and `page_rows` had to keep between them: a
+    // page that was a card *and* a row list printed the same figures twice, once
+    // as a list and again inside the card below it. That is structural now — the
+    // painter has no generic row loop left to disagree with the cards, so there
+    // is no second mechanism for a page to be listed under.
 
-    /// The other half of the anchor contract: a heading may only be spelled
-    /// where a row can reach it. Checked by listing every name the tables
-    /// produce and requiring each to be one the page would draw.
     #[test]
-    fn no_heading_is_spelled_for_a_row_that_cannot_reach_it() {
-        // Each table's anchors, by the row they sit on. A typo on the left of
-        // one of these is a heading that never draws; a typo on the right is a
-        // heading nobody sees. Both are silent, so both are pinned here.
-        let cases: &[(usize, &str, &str)] = &[
-            (OVERVIEW, "Download", "Traffic"),
-            (OVERVIEW, "CPU", "Usage"),
-            (NETWORK, "Network", "Connection"),
-            (NETWORK, "Adapter", "Connection"),
-            (NETWORK, "Wi-Fi", "Signal"),
-            (NETWORK, "Download", "Traffic"),
-            (NETWORK, "Gateway", "Health"),
-            (SYSTEM, "CPU", "Live"),
-            (SYSTEM, "Processor", "Hardware"),
-            (SYSTEM, "Computername", "This machine"),
-            (SYSTEM, "Battery", "Power"),
-            (DATA, "Today", "Totals"),
-            (PORTS, "Listening", "Sockets"),
-            (SPEEDTEST, "Download", "Result"),
-        ];
-        for (page, label, name) in cases {
-            // `prev: None` so the second of a doubled anchor still answers.
-            assert_eq!(
-                page_section(*page, label, None),
-                Some(*name),
-                "{}: {label} no longer opens {name}",
-                PAGES[*page]
-            );
-            assert!(
-                page_rows(*page, &full())
-                    .iter()
-                    .any(|(l, _)| l == label),
-                "{}: no row is labelled {label}",
-                PAGES[*page]
-            );
-        }
+    fn the_connection_card_leads_with_the_network_then_the_adapter() {
+        // Identity first, then the addresses that belong to it, then the far
+        // end. The identity card is the only thing that draws these rows, so a
+        // card that quietly reordered them would fail here rather than reading
+        // slightly wrong on screen.
+        let labels: Vec<&str> = connection_rows(&full()).iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels[0], "Network", "the SSID is the identity: {labels:?}");
+        let at = |l| labels.iter().position(|x| *x == l).unwrap();
+        assert!(at("Adapter") < at("IP"), "{labels:?}");
+        assert!(at("IP") < at("Gateway"), "{labels:?}");
     }
 
     #[test]
-    fn the_doubled_anchor_draws_one_heading_not_two() {
-        // "Connection" is opened by whichever of the SSID and the adapter is
-        // there, because a plugged-in machine has no SSID and a Wi-Fi machine
-        // has both. Both cases have to produce exactly one heading.
-        let both = headings(NETWORK);
-        assert_eq!(both.iter().filter(|h| **h == "Connection").count(), 1);
-
-        let no_ssid = crate::taskbar::TrayModel {
+    fn the_connection_card_drops_the_ssid_row_when_there_is_no_ssid() {
+        // A wired machine has no SSID, and a caption standing beside nothing is
+        // worse than no caption at all.
+        let wired = crate::taskbar::TrayModel {
             wifi_name: None,
-            wifi_text: String::new(),
             ..full()
         };
-        let heads: Vec<&str> = painted(NETWORK, &no_ssid)
-            .into_iter()
-            .filter_map(|(h, _)| h)
-            .collect();
-        assert_eq!(
-            heads.iter().filter(|h| **h == "Connection").count(),
-            1,
-            "the adapter row lost its heading: {heads:?}"
-        );
+        let labels: Vec<&str> = connection_rows(&wired).iter().map(|(l, _)| *l).collect();
+        assert!(labels.iter().all(|l| *l != "Network"), "{labels:?}");
+        assert_eq!(labels[0], "Adapter", "the adapter leads instead");
     }
 
     #[test]
-    fn a_switched_off_metric_does_not_leave_a_header_over_nothing() {
-        // The anchors are on the rows, so with the live pair off the page opens
-        // on Hardware — no "Live" caption hanging over unrelated rows.
-        let model = crate::taskbar::TrayModel {
-            cpu_name_text: "AMD Ryzen 5 7600".into(),
-            ..Default::default()
+    fn the_usage_totals_carry_a_plan_row_only_when_a_plan_is_set() {
+        // `quota_gb == 0.0` is the config's own "no plan", so the card must not
+        // grow a `0 GB` row that says the user has a plan of zero.
+        let no_plan = Config::default();
+        assert_eq!(no_plan.quota_gb, 0.0, "the default really is no plan");
+        assert!(
+            usage_totals(&no_plan, &full())
+                .iter()
+                .all(|(l, _)| *l != "Plan"),
+            "a plan row appeared for a machine with no plan"
+        );
+
+        let planned = Config {
+            quota_gb: 250.0,
+            ..Config::default()
         };
-        let rows = page_rows(SYSTEM, &model);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(page_section(SYSTEM, rows[0].0, None), Some("Hardware"));
-    }
+        let rows = usage_totals(&planned, &full());
+        assert_eq!(rows.last().unwrap().0, "Plan", "the plan closes the card");
+        assert_eq!(rows.last().unwrap().1, "250 GB");
 
-    #[test]
-    fn every_page_groups_its_rows_in_the_order_it_reads_them() {
-        // The headings a page ends up with, in row order, from a model that
-        // answered everything. This is the page's table of contents: if a row
-        // moves, this fails rather than the page quietly reading differently.
-        assert_eq!(headings(OVERVIEW), vec!["Traffic", "Usage"]);
-        assert_eq!(
-            headings(NETWORK),
-            vec!["Connection", "Signal", "Traffic", "Health"]
-        );
-        assert_eq!(
-            headings(SYSTEM),
-            vec!["Live", "Hardware", "This machine", "Power"]
-        );
-        assert_eq!(headings(DATA), vec!["Totals"]);
-        assert_eq!(headings(PORTS), vec!["Sockets"]);
-        assert_eq!(headings(SPEEDTEST), vec!["Result"]);
-        // A heading over a single row is not a group, it is a caption: two
-        // headings for two rows would be more furniture than content. The Data
-        // page is the one exception — its day list gives "Totals" a second row
-        // in practice, above a standalone caption of its own.
-        for page in [OVERVIEW, NETWORK, SYSTEM] {
-            let rows = page_rows(page, &full());
-            let heads = headings(page).len();
-            assert!(
-                rows.len() >= heads * 2,
-                "{}: {heads} headings over {} rows is more caption than content",
-                PAGES[page],
-                rows.len()
-            );
-        }
-    }
-
-    #[test]
-    fn the_system_page_names_what_this_machine_is() {
-        let model = crate::taskbar::TrayModel {
-            computer_text: "ULIN-PC".into(),
-            windows_text: "Windows 11 Pro".into(),
-            cpu_name_text: "AMD Ryzen 5 7600 6-Core Processor".into(),
-            ..Default::default()
+        // And the overage is said in the value rather than by colour: the whole
+        // window already goes red when the quota is blown.
+        let over = crate::taskbar::TrayModel {
+            quota_alert: true,
+            ..full()
         };
-        let rows = page_rows(SYSTEM, &model);
-        let at = |l| rows.iter().position(|(label, _)| *label == l);
-        assert!(at("Computername").unwrap() < at("Windows").unwrap());
-        assert_eq!(rows[at("Computername").unwrap()].1, "ULIN-PC");
+        let rows = usage_totals(&planned, &over);
+        assert!(
+            rows.last().unwrap().1.contains("over plan"),
+            "{:?}",
+            rows.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_socket_counters_come_back_in_reading_order() {
+        // Widest first: what the machine listens on, what is talking, what is
+        // connectionless, and how many processes that is. The open-port list is
+        // drawn under these, so this is the summary the detail belongs to.
+        let labels: Vec<&str> = socket_rows(&full()).iter().map(|(l, _)| *l).collect();
+        assert_eq!(
+            labels,
+            vec!["Listening", "Established", "UDP bound", "Processes"]
+        );
+    }
+
+    #[test]
+    fn a_health_card_with_nothing_to_report_has_no_rows() {
+        // Both probes off — no internet reading, no loss figure — has to be an
+        // empty card, not a card holding two captions with nothing beside them.
+        let quiet = crate::taskbar::TrayModel {
+            internet_text: String::new(),
+            loss_text: String::new(),
+            ..full()
+        };
+        assert!(health_rows(&quiet).is_empty());
+        assert_eq!(health_rows(&full()).len(), 2, "and both rows when both report");
     }
 }

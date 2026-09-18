@@ -17,13 +17,13 @@
 use crate::config::Config;
 use crate::taskbar::render::parse_color;
 use core::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET,
-    DeleteDC, DeleteObject, FW_NORMAL, GGI_MARK_NONEXISTING_GLYPHS, GetGlyphIndicesW, HGDIOBJ,
-    HFONT, OUT_DEFAULT_PRECIS, SelectObject,
+    CreateCompatibleDC, CreateFontW, DeleteDC, DeleteObject, GetGlyphIndicesW, SelectObject,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, FW_NORMAL,
+    GGI_MARK_NONEXISTING_GLYPHS, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS,
 };
-use windows::core::{PCWSTR, w};
 
 // --- spacing, in 96-DPI pixels --------------------------------------------
 //
@@ -56,6 +56,29 @@ pub(crate) const CARD_PAD: i32 = 16;
 /// circle with one glyph in it.
 pub(crate) const CHIP: i32 = 28;
 
+/// The corner an owner-drawn control is rounded by, at 96 DPI.
+///
+/// Shallower than `RADIUS`, and deliberately: a field is 24 pixels tall and a
+/// card is hundreds, so the same number read as a proportion is a card's soft
+/// corner and a *pill* on a control. This is the radius that reads as a rounded
+/// rectangle at both sizes.
+pub(crate) const CTL_RADIUS: i32 = 6;
+
+/// The tick box an owner-drawn checkbox draws, at 96 DPI.
+///
+/// Smaller than `CTL_H` because it is a mark rather than a field: at the row's
+/// own height the box would be as tall as the button beside it and the two
+/// would read as the same kind of thing.
+pub(crate) const BOX: i32 = 16;
+
+/// How far an edit's own rectangle is inset inside the well painted for it.
+///
+/// The one number that makes a native `EDIT` look drawn: the control cannot be
+/// owner-drawn, so the ring of well around it is what the reader sees as its
+/// border, and a zero here would leave the field's plate covering the outline
+/// down to the pixel.
+pub(crate) const FIELD_INSET: i32 = 2;
+
 /// The channel between the two content columns.
 pub(crate) const LANE_GAP: i32 = 16;
 
@@ -79,15 +102,6 @@ pub(crate) const CHIP_TINT_PCT: u32 = 15;
 
 /// The column a sidebar entry spends on its glyph, before its label starts.
 pub(crate) const ICON_COL: i32 = 28;
-
-/// The column a group heading occupies on a metric row's band, before its rule
-/// starts.
-///
-/// Wide enough for the longest heading in use — `THIS MACHINE` — with room to
-/// spare, and narrow enough that a row's own label still fits beside it at the
-/// minimum window width. Too narrow and the longest heading would be cut; too
-/// wide and the rule beside it would be a stub.
-pub(crate) const GROUP_COL: i32 = 116;
 
 /// How many steps a sidebar entry is lifted from the theme's background.
 const SIDEBAR_STEP: u32 = 12;
@@ -125,6 +139,17 @@ pub(crate) struct Palette {
     pub tile_violet: COLORREF,
     pub tile_green: COLORREF,
     pub tile_amber: COLORREF,
+    /// An owner-drawn control's border, and the ink of a tick. A hairline of
+    /// its own rather than `border`'s: the card's rule is mixed toward the
+    /// *page*, and a field outline mixed the same way vanishes into the plate
+    /// it is drawn on — the field has to read as a well cut into the card.
+    pub edge: COLORREF,
+    /// A text field's inside. The card's plate stepped once more, so the field
+    /// reads as recessed rather than as a lighter rectangle painted on top.
+    pub field: COLORREF,
+    /// A button's hover and pressed fill. `selected`, spelled for the controls
+    /// so the two names do not have to agree by coincidence.
+    pub control: COLORREF,
 }
 
 /// Perceived luminance of a `COLORREF`, 0-255.
@@ -172,14 +197,14 @@ const ACCENT_LIGHT: COLORREF = COLORREF(0x00FF_7A00);
 /// above is a pair. Names are the hue, not the reading — the download tile is
 /// blue because it is first, not because blue means download.
 const TINT_DARK: [COLORREF; 4] = [
-    COLORREF(0x00FF_840A), // blue
-    COLORREF(0x00F2_5ABF), // violet
+    COLORREF(0x00FF_840A),   // blue
+    COLORREF(0x00F2_5ABF),   // violet
     COLORREF(0x00_58_D1_30), // green
     COLORREF(0x00_0A_9F_FF), // amber
 ];
 const TINT_LIGHT: [COLORREF; 4] = [
-    COLORREF(0x00FF_7A00), // blue
-    COLORREF(0x00DE_52AF), // violet
+    COLORREF(0x00FF_7A00),   // blue
+    COLORREF(0x00DE_52AF),   // violet
     COLORREF(0x00_59_C7_34), // green
     COLORREF(0x00_00_95_FF), // amber
 ];
@@ -212,6 +237,19 @@ pub(crate) fn palette(cfg: &Config) -> Palette {
         tile_violet: tints[1],
         tile_green: tints[2],
         tile_amber: tints[3],
+        // Toward the *text* rather than the page, so the outline darkens on a
+        // light theme and lightens on a dark one: a border has to move away
+        // from its own plate, and `border` above moves toward the surface.
+        edge: mix(text, crate::ui::theme::shade(surface, CARD_STEP), 60),
+        // A well rather than a plate, so it steps toward black on both themes —
+        // further on a dark one, where a near-black card leaves only a few
+        // levels of headroom before the two become the same colour.
+        field: mix(
+            crate::ui::theme::shade(surface, CARD_STEP),
+            BLACK,
+            if dark { 30 } else { 12 },
+        ),
+        control: crate::ui::theme::shade(crate::ui::theme::shade(surface, CARD_STEP), 22),
     }
 }
 
@@ -247,6 +285,14 @@ pub(crate) const ICON_TIMER: u16 = 0xE823;
 /// *to*, and it is drawn from the configuration rather than from a stored mode
 /// — see `next_preset`, which is also what decides which one it is.
 pub(crate) const ICON_MOON: u16 = 0xE708;
+
+/// The checkmark, for the owner-drawn checkboxes.
+///
+/// From the same icon face as everything above it and checked the same way —
+/// presence read off a rendered contact sheet rather than assumed from the
+/// range, because a codepoint that exists but draws a blank box looks like a
+/// layout fault rather than a wrong constant.
+pub(crate) const ICON_CHECK: u16 = 0xE73E;
 /// The light-mode glyph, the other half of the pair above.
 pub(crate) const ICON_SUN: u16 = 0xE706;
 
@@ -261,6 +307,10 @@ pub(crate) const ICON_SUN: u16 = 0xE706;
 pub(crate) const ICON_TRAFFIC: u16 = 0xE9FA;
 /// A die with pins: the usage group's chip.
 pub(crate) const ICON_USAGE: u16 = 0xE964;
+/// A window with tiles / grid of tiles.
+pub(crate) const ICON_TILES: u16 = 0xE71D;
+/// Sliders / tune / preferences.
+pub(crate) const ICON_TUNE: u16 = 0xE9E9;
 /// A display on a stand, for the system card.
 pub(crate) const ICON_DESKTOP: u16 = 0xEC4E;
 /// An area chart, for the live readings.
@@ -283,7 +333,11 @@ pub(crate) const ICON_CALENDAR: u16 = 0xE787;
 /// The glyph a sidebar entry leads with, by page index.
 /// The glyph for the appearance button: the mode it leads to.
 pub(crate) fn theme_glyph(next_is_dark: bool) -> u16 {
-    if next_is_dark { ICON_MOON } else { ICON_SUN }
+    if next_is_dark {
+        ICON_MOON
+    } else {
+        ICON_SUN
+    }
 }
 
 /// The named presets the appearance button swaps between.
@@ -356,7 +410,11 @@ pub(crate) fn icon_face() -> PCWSTR {
         _ => {
             let fluent = face_has_glyph(FACE_FLUENT, ICON_OVERVIEW);
             FACE.store(if fluent { 1 } else { 2 }, Ordering::Relaxed);
-            if fluent { FACE_FLUENT } else { FACE_MDL2 }
+            if fluent {
+                FACE_FLUENT
+            } else {
+                FACE_MDL2
+            }
         }
     }
 }
@@ -483,6 +541,9 @@ mod tests {
             tile_violet: BLACK,
             tile_green: BLACK,
             tile_amber: BLACK,
+            edge: WHITE,
+            field: BLACK,
+            control: BLACK,
         };
         assert!(
             luma(dark.muted) < luma(dark.text),
@@ -553,16 +614,17 @@ mod tests {
         let p = palette(&cfg);
         assert_ne!(p.sidebar, p.surface);
         assert_ne!(p.border, p.surface);
-        assert_ne!(p.selected, p.sidebar, "a selected entry has to be visible against its own list");
+        assert_ne!(
+            p.selected, p.sidebar,
+            "a selected entry has to be visible against its own list"
+        );
     }
 
     #[test]
     fn every_page_has_a_glyph_and_they_are_distinct() {
         // A copied constant here shows up as two identical icons in the
         // sidebar, which is the kind of thing that survives review.
-        let glyphs: Vec<u16> = (0..crate::ui::pages::PAGES.len())
-            .map(page_icon)
-            .collect();
+        let glyphs: Vec<u16> = (0..crate::ui::pages::PAGES.len()).map(page_icon).collect();
         let mut unique = glyphs.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -591,5 +653,3 @@ mod tests {
         }
     }
 }
-
-

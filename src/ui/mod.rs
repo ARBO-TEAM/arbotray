@@ -64,9 +64,10 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HBRUSH, HGDIOBJ, HFONT, InvalidateRect,
-    PAINTSTRUCT, SetBkColor, SetTextColor,
+    PAINTSTRUCT, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem};
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
 };
@@ -75,7 +76,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetSystemMetrics, GetWindowLongPtrW, IsIconic, IsWindow, KillTimer, MINMAXINFO,
     MoveWindow, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_RESTORE, SW_SHOW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CREATE,
-    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_DPICHANGED, WM_ERASEBKGND,
     WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY,
     WM_PAINT, WM_SIZE, WM_TIMER, WNDCLASSW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_CLIPCHILDREN,
     WS_OVERLAPPEDWINDOW,
@@ -113,11 +114,23 @@ pub(crate) struct UiState {
     /// Interface scale, from `WM_DPICHANGED`. Everything laid out by hand is
     /// multiplied by this.
     dpi: u32,
-    /// The content face, for the same reason: the settings page's checkboxes
-    /// and edit fields ask their parent for a background brush on every paint
-    /// of their own, and a control that is handed the wrong one shows a grey
-    /// plate on a themed page.
+    /// The plate the settings controls stand on: the **card**, not the page.
+    ///
+    /// A native checkbox or edit field asks its parent for a background brush
+    /// on every paint of its own, and hands back whatever rectangle it is given.
+    /// The settings controls all live inside a card now, so the page background
+    /// would punch a page-coloured square out of every card's plate — the
+    /// control is drawn over the card, and the hole around it is the bug this
+    /// avoids.
     face_brush: HBRUSH,
+    /// The same, in the *field* colour, for the edit boxes. They ask for their
+    /// own background too, and the answer has to be the well rather than the
+    /// card — see `WM_CTLCOLOREDIT`.
+    field_brush: HBRUSH,
+    /// The owner-drawn checkboxes' tick state, which the system no longer keeps
+    /// for us — see `settings::Checks`. Public within the crate because the
+    /// `WM_DRAWITEM` arm reaches it through a `&UiState`.
+    pub(crate) checks: crate::ui::settings::Checks,
     /// Our own module, for creating the child window.
     instance: HINSTANCE,
     /// What the Settings page was last loaded with. Held for the same reason
@@ -220,7 +233,9 @@ pub fn ensure(
         return Some(existing);
     }
 
-    let bg = background(cfg);
+    // The controls' plate is the card's colour, not the page's — see
+    // `face_brush`. Rebuilt from scratch on a save, like the fonts.
+    let plate = crate::ui::design::palette(cfg).card;
     let state = Box::new(UiState {
         model: hint.clone(),
         cfg: cfg.clone(),
@@ -234,7 +249,9 @@ pub fn ensure(
         dpi: 96,
         // Owned by the window from here, same as the fonts: `WM_NCDESTROY`
         // deletes it.
-        face_brush: unsafe { CreateSolidBrush(bg) },
+        face_brush: unsafe { CreateSolidBrush(plate) },
+        field_brush: unsafe { CreateSolidBrush(crate::ui::design::palette(cfg).field) },
+        checks: Default::default(),
         instance,
         settings: SettingsForm::from_config(cfg),
         notice: None,
@@ -618,18 +635,27 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if !state.is_null() {
                     let s = &mut *state;
                     let id = control_id(wparam);
+                    // The auto-toggle a `BS_AUTOCHECKBOX` would have done, done
+                    // by hand: the boxes are owner-drawn, so this is the only
+                    // place their state moves on a click. First, because every
+                    // branch below reads the state this just wrote — the plan's
+                    // switch decides whether the number beside it is live, and
+                    // the startup entry is written from what the box now says.
+                    if crate::ui::settings::is_checkbox(id) {
+                        settings::set_check(s, hwnd, id, s.checks.toggle(id));
+                    }
                     if id == SET_QUOTA_ON {
                         // Disabled rather than silently ignored: with the
                         // switch off the number has no meaning, and leaving it
                         // editable would suggest it does.
-                        set_enabled(hwnd, SET_QUOTA, is_checked(hwnd, SET_QUOTA_ON));
+                        set_enabled(hwnd, SET_QUOTA, s.checks.get(SET_QUOTA_ON));
                         s.notice = None;
                     } else if id == SET_AUTOSTART {
                         // Written on the click rather than staged for Save,
                         // because it is the one control on the page that does
                         // not describe `config.json`: the registry is the
                         // authority, so there is nothing here to defer.
-                        let want = is_checked(hwnd, SET_AUTOSTART);
+                        let want = s.checks.get(SET_AUTOSTART);
                         if crate::autostart::set(want) {
                             // Worded to start with `saved` so it paints as a
                             // result rather than as a failure — that prefix is
@@ -644,7 +670,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             // Put the tick back. A checkbox left showing a
                             // state the registry did not accept is a lie about
                             // what will happen at logon.
-                            set_check(hwnd, SET_AUTOSTART, !want);
+                            settings::set_check(s, hwnd, SET_AUTOSTART, !want);
                             s.notice = Some("could not change the startup entry".into());
                         }
                         repaint_after_settings(hwnd, s);
@@ -663,7 +689,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             // row too: the row's word and glyph describe which
                             // way the page goes, and the box just written is the
                             // only thing that knows.
-                            s.settings = read_form(hwnd);
+                            s.settings = settings::read_form(hwnd, &s.checks);
                             write_theme_button(hwnd, &s.settings.background());
                             let _ = InvalidateRect(Some(hwnd), None, false);
                         }
@@ -771,8 +797,18 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         let loaded = Config::load();
                         s.settings = SettingsForm::from_config(&loaded);
                         s.cfg = loaded.clone();
-                        write_form(hwnd, &loaded);
+                        settings::write_form(hwnd, &s.checks, &loaded);
                         s.notice = Some(format!("reloaded {}", Config::path().display()));
+                        repaint_after_settings(hwnd, s);
+                    } else if id == SET_DEFAULTS {
+                        // The built-in defaults, staged behind Save like every
+                        // other field on this page: a reset that wrote to disk
+                        // on the click would be the one control here that acts
+                        // without being asked to commit.
+                        let defaults = Config::default();
+                        settings::write_form(hwnd, &s.checks, &defaults);
+                        s.settings = SettingsForm::from_config(&defaults);
+                        s.notice = Some("reset to defaults \u{2014} press Save to write".into());
                         repaint_after_settings(hwnd, s);
                     }
                 }
@@ -781,17 +817,120 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
             // The settings controls are system controls and would paint
             // themselves in the system's grey-on-white. Hand them the theme's
-            // own face and text instead. `WM_CTLCOLORBTN` is only honoured by
-            // checkboxes and not by push buttons — Windows draws a push button
-            // from its own parts and ignores the brush, which is why Save keeps
-            // its native look and the checkboxes do not.
+            // own face and text instead. A push button ignores this — Windows
+            // draws one from its own themed parts and never asks the parent for
+            // a brush — which is why every button and checkbox on the page is
+            // `BS_OWNERDRAW` and drawn by `WM_DRAWITEM` below. What is left
+            // here is the *edits* and the static labels, and the `SetBkColor`
+            // that the owner-draw arm needs to have already been told.
+            //
+            // Both colours are the *card's*, not the page's. The brush fills the
+            // control's rect and `SetBkColor` fills the box behind its text, so
+            // handing either of them the page background draws a squared patch
+            // of page inside a card — visible as a lighter rectangle around
+            // every label. The two have to agree with `face_brush`.
             WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORBTN => {
                 if !state.is_null() {
                     let s = &*state;
                     let dc = windows::Win32::Graphics::Gdi::HDC(wparam.0 as *mut core::ffi::c_void);
-                    let _ = SetBkColor(dc, background(&s.cfg));
+                    // An edit's own inside is the *well*, not the card: its
+                    // border is gone (see `create_settings`) and the ring of
+                    // outline around it is painted by the page, so a card-
+                    // coloured control here would leave that outline enclosing
+                    // the plate instead of a field.
+                    let plate = if msg == WM_CTLCOLOREDIT {
+                        crate::ui::design::palette(&s.cfg).field
+                    } else {
+                        crate::ui::design::palette(&s.cfg).card
+                    };
+                    let _ = SetBkColor(dc, plate);
                     let _ = SetTextColor(dc, foreground(&s.cfg));
-                    return LRESULT(s.face_brush.0 as isize);
+                    // A brush is returned rather than a colour, and it has to
+                    // match `plate` — see `rebuild_fonts`, which keeps the
+                    // card-coloured one for the checkboxes.
+                    let brush = if msg == WM_CTLCOLOREDIT {
+                        s.field_brush.0
+                    } else {
+                        s.face_brush.0
+                    };
+                    return LRESULT(brush as isize);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
+            // Every checkbox and every push button on the window, because they
+            // are all `BS_OWNERDRAW`: Windows asks here instead of drawing them
+            // from its own parts. That is the whole point of the style — a
+            // native button ignores `WM_CTLCOLORBTN` and would keep its own
+            // look inside a card we painted.
+            WM_DRAWITEM => {
+                if !state.is_null() {
+                    let s = &*state;
+                    // The `DRAWITEMSTRUCT` is behind `lparam`, which is the
+                    // system's own pointer and valid only for this call.
+                    let item = &*(lparam.0 as *const DRAWITEMSTRUCT);
+                    // A DC arrives opaque, and `DrawTextW` in that mode fills
+                    // its text extent with the DC's background colour *before*
+                    // drawing — which is the card brush, from `WM_CTLCOLORBTN`.
+                    // That is not a detail here, it is the whole shape of the
+                    // bug it fixes: the tick is drawn *on* the mark, so an
+                    // opaque glyph erases the accent square it sits on and
+                    // leaves a white tick floating on the card; and the Save
+                    // button's caption cuts a card-coloured hole in its own
+                    // accent fill. Transparent mode is what lets a glyph sit on
+                    // something already painted.
+                    let _ = SetBkMode(item.hDC, TRANSPARENT);
+                    let id = item.CtlID as i32;
+                    let rect = item.rcItem;
+                    let pal = crate::ui::design::palette(&s.cfg);
+                    let icon = crate::ui::design::icon_font(&s.cfg, s.dpi);
+                    // `ODS_` bits are the reason this arm needs the struct at
+                    // all: a pressed or disabled button draws differently, and
+                    // nothing else in the message says which state we are in.
+                    let pressed = item.itemState.0 & ODS_SELECTED.0 != 0;
+                    let enabled = item.itemState.0 & ODS_DISABLED.0 == 0;
+                    let focused = item.itemState.0 & ODS_FOCUS.0 != 0;
+                    // SAFETY: `item.hDC` is a live DC the system owns for the
+                    // duration of this call, and both fonts are the window's.
+                    //
+                    // The caption is read back off the control even though the
+                    // control is owner-drawn: `BS_OWNERDRAW` takes the painting
+                    // away from the button, not its text. `SetWindowTextW` still
+                    // stores it and `GetWindowTextW` still returns it, which is
+                    // what lets the two "drop-downs" on the Timer page keep
+                    // their caption *as* their selection.
+                    let text = crate::ui::settings::text_of(hwnd, id).unwrap_or_default();
+                    if crate::ui::settings::is_checkbox(id) {
+                        crate::ui::components::tick(
+                            item.hDC,
+                            s.font,
+                            icon,
+                            rect,
+                            &text,
+                            s.checks.get(id),
+                            enabled,
+                            &pal,
+                            s.dpi,
+                        );
+                    } else {
+                        // Only Save is filled with the accent: it is the one
+                        // button on the page that commits something, and a
+                        // second primary would make neither read as one.
+                        let primary = id == crate::ui::consts::SET_SAVE;
+                        crate::ui::components::button_face(
+                            item.hDC,
+                            s.font,
+                            rect,
+                            &text,
+                            primary,
+                            focused,
+                            pressed,
+                            enabled,
+                            &pal,
+                            s.dpi,
+                        );
+                    }
+                    return LRESULT(1);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -1093,6 +1232,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let _ = DeleteObject(HGDIOBJ(s.title.0));
                     let _ = DeleteObject(HGDIOBJ(s.clock.0));
                     let _ = DeleteObject(HGDIOBJ(s.face_brush.0));
+                    let _ = DeleteObject(HGDIOBJ(s.field_brush.0));
                 }
                 LRESULT(0)
             }
@@ -1329,6 +1469,7 @@ fn chrome(hwnd: HWND, state: &UiState) {
 mod tests {
     use super::*;
     use crate::config::QUOTA_MIN_GB;
+    use crate::ui::design::LANE_GAP;
     use windows::Win32::Foundation::COLORREF;
 
     fn full() -> TrayModel {
@@ -1371,8 +1512,8 @@ mod tests {
                 ("D:".into(), "1.2T free of 1.8T".into()),
             ],
             // The Ports page's detail, likewise filled: the open-port list is
-            // painted outside `page_rows` and has its own empty state, so the
-            // tests that walk a page need the non-empty branch.
+            // painted outside the socket counters and has its own empty state,
+            // so the tests that walk a page need the non-empty branch.
             listeners_text: "24".into(),
             established_text: "87".into(),
             udp_text: "31".into(),
@@ -1407,14 +1548,10 @@ mod tests {
         }
     }
 
-    fn labels(page: usize, model: &TrayModel) -> Vec<&'static str> {
-        page_rows(page, model).into_iter().map(|(l, _)| l).collect()
-    }
-
     #[test]
     fn every_page_is_reachable_from_the_sidebar() {
         // The sidebar is built from `PAGES` and indexed by position, so a page
-        // whose rows fall through to `_` would be silently invisible.
+        // with no label is a slot the reader cannot click through to.
         for (i, name) in PAGES.iter().enumerate() {
             assert!(!name.is_empty(), "page {i} has no label to click");
         }
@@ -1430,10 +1567,12 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_page_has_no_metric_rows() {
-        // Without its own arm in `page_rows` it would fall through to the
-        // overview and paint traffic figures between its own fields.
-        assert!(page_rows(SETTINGS, &full()).is_empty());
+    fn the_settings_page_has_no_chart() {
+        // Settings draws native controls over its own painted captions rather
+        // than a plate of figures, so the page-wide sparkline has nothing to
+        // say on it. The card-versus-row exclusivity this test used to carry
+        // alongside the assertion is structural now — the painter has no
+        // generic row loop to disagree with its card arms.
         assert!(!page_shows_graph(SETTINGS), "settings are not a traffic story");
     }
 
@@ -1442,11 +1581,13 @@ mod tests {
         // The painter zips this array against row indices. A short array would
         // silently drop the last caption — which is the one that names the
         // button that does the work.
-        assert_eq!(SET_ROW_LABELS.len(), SET_ROW_COUNT);
+        assert_eq!(SET_ROW_LABELS.len(), FORM_ROWS);
         assert_eq!(SET_ROW_LABELS[ROW_SAVE], "Write config.json");
-        // The tile rows carry the checkboxes' own labels, so they are blank.
-        for row in 0..ROW_REFRESH {
-            assert!(SET_ROW_LABELS[row].is_empty(), "row {row} has a caption");
+        // Every row in the preferences card carries a control and so must carry
+        // a caption: the tile grid above it is a different card and has its row
+        // numbers to itself, so a blank here is a band with nothing on it.
+        for (row, label) in SET_ROW_LABELS.iter().enumerate() {
+            assert!(!label.is_empty(), "row {row} has no caption");
         }
     }
 
@@ -1458,7 +1599,7 @@ mod tests {
         let mut seen: Vec<i32> = Vec::new();
         for (id, row) in FIELD_ROWS {
             assert!(!seen.contains(&id), "control {id} laid out twice");
-            assert!(row < SET_ROW_COUNT, "control {id} is off the page");
+            assert!(row < FORM_ROWS, "control {id} is off the page");
             seen.push(id);
         }
         assert_eq!(seen.len(), FIELD_ROWS.len());
@@ -1503,9 +1644,12 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), slots.len());
-        // And the grid must end before the first labelled field starts.
+        // The grid is its own card now, so it has no row numbers to collide
+        // with: what has to hold is that it packs into exactly the `TILE_ROWS`
+        // bands the card's height was computed from, or the card's bottom edge
+        // would be drawn through its last row.
         let last_row = slots.iter().map(|(r, _)| *r).max().unwrap();
-        assert!(last_row < ROW_REFRESH, "the grid overlaps the fields below it");
+        assert_eq!(last_row + 1, TILE_ROWS, "the grid is not TILE_ROWS rows tall");
     }
 
     #[test]
@@ -1733,51 +1877,25 @@ mod tests {
         assert_eq!(parse_int(Some("1.5")), None, "a size is whole");
     }
 
-    #[test]
-    fn the_overview_leads_with_the_traffic_numbers() {
-        assert_eq!(
-            labels(OVERVIEW, &full()),
-            vec!["Download", "Upload", "Latency", "CPU", "RAM"]
-        );
-    }
+    // `the_overview_leads_with_the_traffic_numbers` stood here. The Overview's
+    // tiles are built inline in `paint.rs` — the three traffic readings and the
+    // two loads are laid out there rather than read from a table — so nothing
+    // reachable from this file can assert their order, and the page's own test
+    // in `paint.rs` is what pins it.
 
-    #[test]
-    fn the_adapter_detail_moves_off_the_overview() {
-        // The whole reason the network information is worth a page: it was
-        // competing with the numbers people actually open the window for.
-        let net = labels(NETWORK, &full());
-        assert_eq!(
-            net,
-            vec![
-                "Network",
-                "Adapter",
-                "IP",
-                "DNS",
-                "Wi-Fi",
-                "Download",
-                "Upload",
-                "Gateway",
-                "Latency",
-                "Internet",
-                "Loss"
-            ]
-        );
-        // None of that detail may leak onto the page people open for the
-        // numbers — that was the point of giving it a page at all.
-        let overview = labels(OVERVIEW, &full());
-        for leaked in [
-            "Network", "Adapter", "IP", "DNS", "Wi-Fi", "Gateway", "Internet", "Loss",
-        ] {
-            assert!(!overview.contains(&leaked), "{leaked} leaked onto Overview");
-        }
-    }
+    // `the_adapter_detail_moves_off_the_overview` stood here, pinning both that
+    // the Network page carries the adapter detail and that it does not leak onto
+    // the Overview. The first half is `the_connection_card_*` in `pages.rs` now;
+    // the second is structural: the Overview's cards are built inline in
+    // `paint.rs` and draw no row from `connection_rows`, so there is no path by
+    // which one of its labels could reach that page.
 
     #[test]
     fn the_local_ip_reads_before_the_gateway_it_belongs_to() {
         // This machine before the router it talks to: the two are the same
-        // reading from either end, and a page that shows one without the other
+        // reading from either end, and a card that shows one without the other
         // leaves the reader to work out which end they are looking at.
-        let rows = page_rows(NETWORK, &full());
+        let rows = connection_rows(&full());
         let at = |label| rows.iter().position(|(l, _)| *l == label).unwrap();
         assert!(at("Adapter") < at("IP"), "the address needs its subject first");
         assert!(at("IP") < at("Gateway"));
@@ -1796,32 +1914,21 @@ mod tests {
             adapter_text: "Ethernet".into(),
             ..Default::default()
         };
-        let rows = page_rows(NETWORK, &model);
+        let rows = connection_rows(&model);
         assert_eq!(rows, vec![("Adapter", "Ethernet".to_string())]);
-        assert!(page_rows(NETWORK, &TrayModel::default()).is_empty());
+        assert!(connection_rows(&TrayModel::default()).is_empty());
     }
 
-    #[test]
-    fn the_system_page_leads_with_the_live_metrics() {
-        // The page grew from two rows to eleven. The live pair stays at the top
-        // because it is what moves — everything below it is a reading of
-        // something that does not, and burying the moving numbers under the
-        // machine's name would make the page's most useful line its hardest to
-        // find.
-        //
-        // `Version` is last, and it is the one row here that is always present
-        // on every machine: the build line belongs at the foot, after the
-        // machine has been described, because it is a fact about the program
-        // rather than about the hardware.
-        let rows = labels(SYSTEM, &full());
-        assert_eq!(&rows[..2], ["CPU", "RAM"]);
-        assert_eq!(rows.last(), Some(&"Version"));
-        assert_eq!(rows.len(), 11, "the detail rows are missing: {rows:?}");
-    }
+    // `the_system_page_leads_with_the_live_metrics` stood here. The System
+    // page's identity and live rows are built inline in `paint.rs` — "CPU",
+    // "RAM", "Computer", "Windows", "Uptime", "Version" are drawn there rather
+    // than read from a table — so nothing reachable from this file can assert
+    // their order, and the page's own test in `paint.rs` is what pins it.
 
     #[test]
     fn the_daily_total_has_a_page_of_its_own() {
-        let data = page_rows(DATA, &full());
+        let cfg = Config::default();
+        let data = usage_totals(&cfg, &full());
         assert_eq!(data[0], ("Today", "1.4G".to_string()));
         assert_eq!(data[1], ("Month", "41.2G".to_string()));
         assert!(page_shows_graph(DATA), "the total is a traffic story too");
@@ -1832,12 +1939,13 @@ mod tests {
         // The sum only covers the days the file still holds. The caveat has to
         // live in the caption: a number the reader has to decode twice is a
         // number they misread, and "41.2G" with no qualifier claims a month.
+        let cfg = Config::default();
         let partial = TrayModel {
             month_partial: true,
             ..full()
         };
-        assert_eq!(labels(DATA, &partial)[1], "Month so far");
-        assert_eq!(labels(DATA, &full())[1], "Month");
+        assert_eq!(usage_totals(&cfg, &partial)[1].0, "Month so far");
+        assert_eq!(usage_totals(&cfg, &full())[1].0, "Month");
     }
 
     #[test]
@@ -1902,30 +2010,14 @@ mod tests {
         assert_eq!(pct_of("140%"), 1.0);
     }
 
-    #[test]
-    fn empty_fields_leave_no_blank_rows() {
-        let only_down = TrayModel {
-            down_text: "1.4M/s".into(),
-            ..Default::default()
-        };
-        assert_eq!(page_rows(OVERVIEW, &only_down).len(), 1);
-
-        // A switched-off tile is empty, but the latency placeholder is not.
-        let placeholder = TrayModel {
-            latency_text: "--".into(),
-            ..Default::default()
-        };
-        let rows = page_rows(OVERVIEW, &placeholder);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, "--");
-    }
-
-    #[test]
-    fn a_window_with_nothing_switched_on_has_no_rows() {
-        for page in 0..PAGES.len() {
-            assert!(page_rows(page, &TrayModel::default()).is_empty());
-        }
-    }
+    // `empty_fields_leave_no_blank_rows` and `a_window_with_nothing_switched_on_has_no_rows`
+    // stood here. Both were properties of the generic row table: an empty model
+    // field produced no row, and a page with everything switched off produced
+    // nothing at all. The card tables carry the same rule one card at a time —
+    // an empty value is no row rather than a caption beside nothing — and it is
+    // checked where the rows are built, in `pages.rs`:
+    // `an_adapter_with_no_address_still_names_itself` for the identity card and
+    // `a_health_card_with_nothing_to_report_has_no_rows` for the health card.
 
     #[test]
     fn the_command_packing_is_unpacked_the_way_windows_packs_it() {
@@ -1992,10 +2084,27 @@ mod tests {
         // row table rather than pinned to the foot — so a row added without
         // `START_H` moving would open the window with that field under the
         // frame's edge, and nothing else would notice.
-        let last = form_top(96) + ROW_H * ROW_SAVE as i32;
+        //
+        // Measured from the second card's own top, not from `form_top`: the
+        // form moved down by the first card and the lane gap after it, and a
+        // check against `form_top` would keep passing while the Save button sat
+        // below the window.
+        let last = prefs_body_top(96) + ROW_H * ROW_SAVE as i32;
         assert!(
             last + ROW_H < START_H,
             "START_H {START_H} leaves the last row ({last}) no room"
+        );
+        // And the second card has to fit under it, since its bottom edge is what
+        // the reader actually sees.
+        let card_bottom = cards_top(96) + tiles_card_h(96) + scale(LANE_GAP, 96) + prefs_card_h(96);
+        assert!(
+            card_bottom < START_H,
+            "START_H {START_H} cuts the second card off at {card_bottom}"
+        );
+        // The first card's grid has to end inside its own plate.
+        assert!(
+            tiles_body_top(96) + ROW_H * TILE_ROWS as i32 <= cards_top(96) + tiles_card_h(96),
+            "the tile grid runs out through the bottom of its card"
         );
     }
 
@@ -2023,7 +2132,7 @@ mod tests {
         // index, so the two only agree while every row index below the count
         // is used by exactly the controls `FIELD_ROWS` gives it.
         for (id, row) in FIELD_ROWS {
-            assert!(row < SET_ROW_COUNT, "control {id} is off the page");
+            assert!(row < FORM_ROWS, "control {id} is off the page");
             assert!(
                 !SET_ROW_LABELS[row].is_empty(),
                 "control {id} sits on a band with no caption"
@@ -2036,16 +2145,14 @@ mod tests {
         // Measured on the running page: a native control centres its own text
         // while a row draws from the top of its band, which left every label
         // on the form five pixels above the value next to it.
+        //
+        // It is one number for the whole form now. It used to be applied by
+        // row, because the old layout put a caption-only divider band among the
+        // fields and dropping *its* caption would have slid the rule off the
+        // band it was given. Every row on the card carries a control, so there
+        // is no such band left to except.
         assert!(FIELD_DROP > 0, "a field row has to drop to meet its control");
         assert_eq!(FIELD_DROP, 5, "re-measure if the control font or CTL_H moved");
-        // Every band that carries a control drops, and only those: the divider
-        // claims a band of its own, and moving its caption would slide the rule
-        // off the band it was given.
-        for (id, row) in FIELD_ROWS {
-            assert_eq!(field_drop(row, 96), FIELD_DROP, "control {id} on row {row}");
-        }
-        assert_eq!(field_drop(ROW_DIVIDER, 96), 0, "the rule must not move");
-        assert_eq!(field_drop(ROW_REFRESH, 96), FIELD_DROP, "row 5 has a field");
     }
 
     #[test]

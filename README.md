@@ -56,7 +56,7 @@ The binary lands at `target/release/arbotray.exe` (~485 KB).
 
 Hovering the tray icon shows the full readout — every enabled field under its own label, the two rates under ↓ and ↑ — plus the connected network name, which is the one field too long for the taskbar. The lines are fitted to the tooltip, so the last one is dropped rather than clipped when a machine reports everything at once.
 
-Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, Network, System, Data, Ports, Speed Test, Stopwatch — over the same readings, plus a chart, a built-in speed test and a stopwatch.
+Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, Network, System, Data, Ports, Speed Test, Stopwatch, Timer, Settings — over the same readings, plus a chart, a built-in speed test, a stopwatch and a sleep / shut-down timer. Every page is drawn as a stack of rounded cards, one per group of readings — on Settings that is a "Display Tiles" card for the tile checkboxes and a "Preferences" card for the form, and on the Timer page a "Power timer" card under the form, shown only when it clears the Arm button.
 
 ## Config
 

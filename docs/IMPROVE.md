@@ -1,20 +1,15 @@
-Daftar fitur aplikasi **Net Speed Meter** (v6.0.0.0) yang tertera pada jendela informasi:
+Daftar fitur aplikasi **ArboTray** — semua fitur tersedia gratis tanpa batasan.
 
 ---
 
-### Fitur Edisi Gratis (Free Edition)
+### Fitur
 
 * **Live Speed Widget**: menampilkan kecepatan unduh (*download*) dan unggah (*upload*) secara *real-time*.
 * **Always-on-Top Widget**: widget melayang yang dapat digeser ke posisi mana saja dan selalu berada di lapisan paling atas layar.
-* **System Tray Icon**: indikator kecepatan serta notifikasi langsung dari area *system tray*.
+* **System Tray Icon**: indikator kecepatan pada *tooltip* area *system tray*, dengan menu klik-kanan.
 * **Settings**: konfigurasi preferensi aplikasi, pemantauan jaringan, dan antarmuka (UI).
 * **Adapter Config**: memilih serta mengatur adapter jaringan yang aktif.
 * **Tema Gelap & Terang**: dukungan mode tampilan *Dark* dan *Light*, opsi *always-on-top*, serta pengaturan visual lainnya.
-
----
-
-### Fitur Premium (Go Premium)
-
 * **Dashboard**: ringkasan menyeluruh aktivitas jaringan saat ini beserta statistik utama.
 * **Data Plan**: mengatur dan memantau kuota/batas pemakaian data serta penggunaannya.
 * **WiFi**: detail jaringan Wi-Fi, kekuatan sinyal, hingga pengelolaan kata sandi yang tersimpan.
@@ -27,3 +22,6 @@ Daftar fitur aplikasi **Net Speed Meter** (v6.0.0.0) yang tertera pada jendela i
 * **Active Process**: pemantauan konsumsi *bandwidth* jaringan secara *real-time* per aplikasi/proses yang sedang berjalan.
 * **Stopwatch**: fitur pengukur waktu langsung untuk mencatat durasi koneksi atau sesi pemakaian internet.
 * **Port Active**: pemantauan daftar porta (*ports*) jaringan yang sedang aktif/terbuka beserta protokol dan proses terkait.
+* **Timer**: jadwalkan aksi *sleep* atau *shutdown* otomatis berdasarkan waktu jam atau hitungan mundur.
+* **Update Check**: pengecekan pembaruan aplikasi di latar belakang, tanpa instalasi otomatis.
+* **Start with Windows**: jalankan ArboTray secara otomatis saat Windows menyala.

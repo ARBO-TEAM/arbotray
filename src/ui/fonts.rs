@@ -1,11 +1,11 @@
 //! The three faces the window draws with.
 
 use crate::config::Config;
+use windows::core::w;
 use windows::Win32::Graphics::Gdi::{
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, FW_NORMAL, HFONT,
+    CreateFontW, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, FW_NORMAL, HFONT,
     OUT_DEFAULT_PRECIS,
 };
-use windows::core::w;
 
 /// Building a row font at `dpi`. `extra` is added to the configured point size
 /// — values lead, headings more so. A failed `CreateFontW` yields a null

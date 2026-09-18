@@ -2,7 +2,6 @@
 
 use crate::ui::fonts::create_font;
 use crate::ui::settings::layout_settings;
-use crate::ui::theme::background;
 use crate::ui::UiState;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ};
@@ -42,7 +41,7 @@ pub(crate) const TITLE_PAD: i32 = 12;
 /// the window — `Processor` beside `AMD Ryzen 5 7600 6-Core Processor` — no
 /// longer fit and would have been ellipsised, so the floor moved out with them.
 pub(crate) const MIN_W: i32 = 660;
-pub(crate) const MIN_H: i32 = 320;
+pub(crate) const MIN_H: i32 = 340;
 
 /// Initial size: room for the rows plus a decent sparkline.
 ///
@@ -69,7 +68,12 @@ pub(crate) fn rebuild_fonts(state: &mut UiState) {
     // SAFETY: all four fonts are ours and are not selected into any DC between
     // paints.
     unsafe {
-        for font in [&mut state.font, &mut state.bold, &mut state.title, &mut state.clock] {
+        for font in [
+            &mut state.font,
+            &mut state.bold,
+            &mut state.title,
+            &mut state.clock,
+        ] {
             let _ = DeleteObject(HGDIOBJ(font.0));
         }
     }
@@ -79,12 +83,20 @@ pub(crate) fn rebuild_fonts(state: &mut UiState) {
     state.clock = create_font(&state.cfg, state.dpi, CLOCK_EXTRA, true);
 
     // The controls' face is the theme too: a background edit has to move it or
-    // the checkboxes keep the old plate until the next launch.
-    let bg = background(&state.cfg);
-    // SAFETY: the brush is ours; the window holds it in `UiState` and replaces
-    // it here, so the old one is no longer referenced.
+    // the checkboxes keep the old plate until the next launch. The plate is the
+    // **card's** colour rather than the page's, because every settings control
+    // stands on a card — handing them the page background draws a squared hole
+    // in the plate under each one.
+    let pal = crate::ui::design::palette(&state.cfg);
+    // SAFETY: both brushes are ours; the window holds them in `UiState` and
+    // replaces them here, so the old ones are no longer referenced.
     unsafe {
         let _ = DeleteObject(HGDIOBJ(state.face_brush.0));
-        state.face_brush = CreateSolidBrush(bg);
+        state.face_brush = CreateSolidBrush(pal.card);
+        // The edit boxes' plate, on the same path and for the same reason: an
+        // edit asks for its own background, and a save that moved the theme and
+        // left this behind would leave nine fields in the old scheme's grey.
+        let _ = DeleteObject(HGDIOBJ(state.field_brush.0));
+        state.field_brush = CreateSolidBrush(pal.field);
     }
 }
