@@ -7,12 +7,17 @@
 //! and the Settings captions have to sit on the bands that `layout_settings`
 //! put the controls on.
 
-use crate::ui::components::{Canvas, Fonts, draw};
-use crate::ui::design::{S2, S3, palette};
+use crate::ui::components::{
+    Canvas, Fonts, card_h, draw, head_h, lane_h, meter_h,
+};
+use crate::ui::design::{
+    ICON_DESKTOP, ICON_LATENCY, ICON_LIVE, ICON_MACHINE, ICON_MEMORY, ICON_STORAGE, ICON_TRAFFIC,
+    ICON_UP, ICON_DOWN, ICON_USAGE, S2, S3, palette,
+};
 use crate::power;
 use crate::ui::pages::{
-    DATA, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER, page_rows, page_section,
-    page_shows_graph, usage_rows,
+    DATA, OVERVIEW, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER, page_rows,
+    page_section, page_shows_graph, pct_of, usage_rows,
 };
 use crate::ui::settings::{
     FIELD_DROP, ROW_APPEARANCE, ROW_DIVIDER, SET_ROW_LABELS, TIMER_LABELS, field_drop,
@@ -28,6 +33,13 @@ use windows::Win32::Graphics::Gdi::{
     HGDIOBJ, NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+/// The band the Overview's history chart fills, in 96-DPI pixels.
+///
+/// Fixed rather than "whatever is left": the chart lives in a card now, and a
+/// card sized to the window's remainder would grow and shrink as the user
+/// resizes, moving the cards above it.
+const CHART_H: i32 = 130;
 
 /// Draw one frame: background, sidebar, heading, the page's rows, chart, and
 /// the confirmation popup if one is up.
@@ -109,6 +121,13 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // title and rows look centred in the window rather than pushed to the
         // ceiling. `layout_settings` moves its controls by the same amount.
         c.space(scale(TITLE_PAD, state.dpi));
+        // Before the heading, because the pill rides the title's own band: it
+        // claims no space, so whichever is drawn first is simply underneath.
+        // The heading is left-aligned and the pill is pinned right, so the two
+        // share the band without meeting.
+        if page == OVERVIEW {
+            c.date_pill(state.dpi, &power::today_label());
+        }
         c.heading(PAGES[page], scale(ROW_H + TITLE_EXTRA * 2, state.dpi));
 
         // An over-quota window is red top to bottom, not red in a footnote: the
@@ -120,47 +139,210 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
         // Which heading the page has drawn last, so a group opened by two rows
         // — "Connection" is either the SSID or the adapter, whichever is there —
         // draws one heading rather than one per row.
-        let mut drawn: Option<&'static str> = None;
-        for (label, value) in &page_rows(page, &state.model) {
-            // A metric page is a wall of pairs, and ten of them with nothing
-            // between them is a wall ten rows tall. The headings come from the
-            // page's own anchor table and are drawn *on* the row they name, so
-            // grouping costs no vertical space and cannot move a row out of
-            // order. Anchored on the row, so a group whose first row is
-            // switched off has no heading rather than one standing over someone
-            // else's rows.
-            if let Some(name) = page_section(page, label, drawn) {
-                c.heading_row(name);
-                drawn = Some(name);
-            }
-            c.row(label, value);
-        }
-
-        // The System page's volumes. They come through here rather than through
-        // `page_rows` for the same reason the day list below does: a drive
-        // letter is a runtime label, not a `&'static str` caption. Under a
-        // caption of its own so a machine with three volumes reads as one group
-        // instead of three stray rows under the power reading.
-        if page == SYSTEM && !state.model.disks.is_empty() {
-            c.section("Storage");
-            for (mount, usage) in &state.model.disks {
-                c.row(mount, usage);
+        //
+        // The Overview and System pages are skipped: they are cards now, drawn
+        // by the two branches below, and a row list under a card would be the
+        // same numbers twice.
+        if page != OVERVIEW && page != SYSTEM {
+            let mut drawn: Option<&'static str> = None;
+            for (label, value) in &page_rows(page, &state.model) {
+                // A metric page is a wall of pairs, and ten of them with nothing
+                // between them is a wall ten rows tall. The headings come from
+                // the page's own anchor table and are drawn *on* the row they
+                // name, so grouping costs no vertical space and cannot move a
+                // row out of order. Anchored on the row, so a group whose first
+                // row is switched off has no heading rather than one standing
+                // over someone else's rows.
+                if let Some(name) = page_section(page, label, drawn) {
+                    c.heading_row(name);
+                    drawn = Some(name);
+                }
+                c.row(label, value);
             }
         }
 
-        // Where to get a newer build, when one was found. The row above it
-        // already says *that* there is one — `0.7.1 → 0.8.0` — so this line is
-        // only the next step, and it is drawn in the accent colour because it is
-        // the one line on this page asking to be acted on. Absent entirely
-        // otherwise: there is no "up to date" line, because a page that says
-        // "you are current" every time you open it is a page that has taught you
-        // to stop reading it.
+        // --- Overview: three cards, each one a group of readings ------------
+        //
+        // Every card is sized from its own contents (`card_h` and the three
+        // `*_h` helpers) rather than from a number written here, because a card
+        // whose height and contents disagree draws its last row through its own
+        // bottom edge — and the disagreement is invisible until a feature is
+        // switched off and a row disappears.
+        if page == OVERVIEW {
+            let m = &state.model;
+            let dpi = state.dpi;
+            c.subtitle("Live traffic and load at a glance");
+
+            // Traffic: three readings as one lane. The lane needs all three, so
+            // a machine whose latency probe is off falls back to rows rather
+            // than showing two tiles and a gap where the third belongs.
+            let tiles = [
+                (pal.tile_blue, ICON_DOWN, m.down_text.as_str(), "Download"),
+                (pal.tile_violet, ICON_UP, m.up_text.as_str(), "Upload"),
+                (pal.tile_amber, ICON_LATENCY, m.latency_text.as_str(), "Latency"),
+            ];
+            let traffic: Vec<_> = tiles.iter().filter(|t| !t.2.is_empty()).collect();
+            if !traffic.is_empty() {
+                let inner = if traffic.len() == 3 {
+                    head_h(dpi) + lane_h(dpi)
+                } else {
+                    head_h(dpi) + traffic.len() as i32 * row_h
+                };
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_TRAFFIC, pal.tile_blue, "Traffic", "Live");
+                    if traffic.len() == 3 {
+                        c.stat_lane(dpi, tiles);
+                    } else {
+                        for (_, _, value, caption) in &traffic {
+                            c.row(caption, value);
+                        }
+                    }
+                });
+            }
+
+            // Usage: the two live loads, as meters. A proportion is the whole
+            // reading here — "40%" as a number is a figure, the same figure as a
+            // bar is a load — so both go through `meter` and neither as a row.
+            let loads = [
+                ("CPU", m.cpu_text.as_str(), pal.tile_blue),
+                ("RAM", m.ram_text.as_str(), pal.tile_green),
+            ];
+            let live: Vec<_> = loads.iter().filter(|l| !l.1.is_empty()).collect();
+            if !live.is_empty() {
+                let inner = head_h(dpi) + live.len() as i32 * meter_h(row_h, dpi);
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    // The right slot carries the first reading, so the card's
+                    // head says something rather than repeating its own title.
+                    let lead = live[0].1;
+                    c.card_head(dpi, ICON_USAGE, pal.tile_green, "Usage", lead);
+                    for (label, value, tint) in &live {
+                        c.meter(dpi, label, value, pct_of(value), *tint);
+                    }
+                });
+            }
+
+            // History: the chart, inside a card rather than filling the window's
+            // remainder. A fixed band instead, so the card is the same height
+            // whether or not the history has filled in yet — a chart that grew
+            // the card as samples arrived would move everything below it.
+            let chart_inner = scale(CHART_H, dpi);
+            c.card(dpi, card_h(dpi, head_h(dpi) + chart_inner + scale(S2, dpi)), |c| {
+                let right = crate::ui::chart::span_label(m.history.len(), state.cfg.interval_ms);
+                c.card_head(dpi, ICON_LIVE, pal.tile_violet, "History", &right);
+                c.space(scale(S2, dpi));
+                let top = c.y();
+                let area = RECT {
+                    left: c.x0,
+                    top,
+                    right: c.x1,
+                    bottom: top + chart_inner,
+                };
+                // The answer is ignored on purpose: a frame with one sample in
+                // it draws no chart, and the card keeps its band either way.
+                let _ = crate::ui::chart::paint(c, area, &m.history, state.cfg.interval_ms, dpi);
+            });
+        }
+
+        // --- System: what this machine is, in cards -------------------------
         if page == SYSTEM {
-            if let Some(newer) = crate::update::available() {
-                c.note(
-                    &format!("Version {newer} is available \u{2014} {}", crate::update::DOWNLOADS),
-                    pal.accent,
-                );
+            let m = &state.model;
+            let dpi = state.dpi;
+            c.subtitle(&m.computer_text);
+
+            let live = [
+                ("CPU", m.cpu_text.as_str(), pal.tile_blue),
+                ("RAM", m.ram_text.as_str(), pal.tile_violet),
+            ];
+            let live: Vec<_> = live.iter().filter(|l| !l.1.is_empty()).collect();
+            if !live.is_empty() {
+                let inner = head_h(dpi) + live.len() as i32 * meter_h(row_h, dpi);
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_LIVE, pal.tile_blue, "Live", "Now");
+                    for (label, value, tint) in &live {
+                        c.meter(dpi, label, value, pct_of(value), *tint);
+                    }
+                });
+            }
+
+            let hardware = [
+                ("Processor", m.cpu_name_text.as_str()),
+                ("Cores", m.cores_text.as_str()),
+                ("Graphics", m.gpu_text.as_str()),
+            ];
+            let hardware: Vec<_> = hardware.iter().filter(|h| !h.1.is_empty()).collect();
+            if !hardware.is_empty() {
+                let inner = head_h(dpi) + hardware.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_MEMORY, pal.tile_violet, "Hardware", "");
+                    for (label, value) in &hardware {
+                        c.row(label, value);
+                    }
+                });
+            }
+
+            // The machine's own identity, with the update notice inside it: the
+            // notice is about the build named two rows above, not about the
+            // machine, but it is the same subject and a card of its own for one
+            // line would be more furniture than content.
+            let newer = crate::update::available();
+            let machine = [
+                ("Computer", m.computer_text.as_str()),
+                ("Windows", m.windows_text.as_str()),
+                ("Uptime", m.uptime_text.as_str()),
+                ("Version", m.version_text.as_str()),
+            ];
+            let machine: Vec<_> = machine.iter().filter(|h| !h.1.is_empty()).collect();
+            if !machine.is_empty() || newer.is_some() {
+                let inner = head_h(dpi)
+                    + (machine.len() + usize::from(newer.is_some())) as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_DESKTOP, pal.tile_green, "This machine", "");
+                    for (label, value) in &machine {
+                        c.row(label, value);
+                    }
+                    // Where to get a newer build, when one was found. The row
+                    // above already says *that* there is one — `0.7.1 → 0.8.0` —
+                    // so this line is only the next step. Absent entirely
+                    // otherwise: there is no "up to date" line, because a page
+                    // that says "you are current" every time you open it has
+                    // taught you to stop reading it.
+                    if let Some(version) = newer {
+                        c.note(
+                            &format!(
+                                "Version {version} is available \u{2014} {}",
+                                crate::update::DOWNLOADS
+                            ),
+                            pal.accent,
+                        );
+                    }
+                });
+            }
+
+            // Power, only on a machine that has any. A desktop reports neither
+            // and gets no card, rather than an empty one saying nothing.
+            let power_rows = [
+                ("Battery", m.battery_text.as_str()),
+                ("Power", m.power_text.as_str()),
+            ];
+            let power_rows: Vec<_> = power_rows.iter().filter(|p| !p.1.is_empty()).collect();
+            if !power_rows.is_empty() {
+                let inner = head_h(dpi) + power_rows.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_MACHINE, pal.tile_amber, "Power", "");
+                    for (label, value) in &power_rows {
+                        c.row(label, value);
+                    }
+                });
+            }
+
+            if !m.disks.is_empty() {
+                let inner = head_h(dpi) + m.disks.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_STORAGE, pal.tile_amber, "Storage", "");
+                    for (mount, usage) in &m.disks {
+                        c.row(mount, usage);
+                    }
+                });
             }
         }
 

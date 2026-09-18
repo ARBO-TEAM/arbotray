@@ -46,14 +46,11 @@ pub(crate) const MIN_H: i32 = 320;
 
 /// Initial size: room for the rows plus a decent sparkline.
 ///
-/// `START_H` tracks the Settings page's row count — the tallest page, since it
-/// is the one that grows a band per setting. The last band starts at
-/// `form_top(96) + ROW_H * ROW_SAVE` = 530, so the floor is that plus a whole
-/// row of margin, and one more for the notice the page paints under its
-/// buttons; a page that grows a row without this moving would open with its
-/// last field under the frame's edge, and nothing in the layout would complain.
+/// `START_H` tracks the System page's card stack — the tallest page now that it
+/// is five cards rather than eleven rows. A card wears `2*CARD_PAD + CHIP + S2`
+/// of chrome over its rows, so the stack needs ~860 where the rows needed 580.
 pub(crate) const START_W: i32 = 720;
-pub(crate) const START_H: i32 = 580;
+pub(crate) const START_H: i32 = 960;
 
 /// Put the Settings controls where they belong. Called on every resize, which
 /// is also what keeps them correct across a DPI change.
