@@ -31,7 +31,10 @@ use windows::Win32::Graphics::Gdi::{DT_LEFT, HDC, HFONT, InvalidateRect, SetText
 /// The gap above the first entry. Small: the sidebar has no header of its own,
 /// and the page's own heading on the other side of the divider is what the eye
 /// should land on first.
-const TOP: i32 = S3;
+///
+/// Visible to the layout, which derives the window's minimum height from the
+/// list's own geometry rather than from a number kept in step by hand.
+pub(crate) const TOP: i32 = S3;
 
 /// How far the selection pill is inset from the sidebar's edges, and the sliver
 /// of air above and below its label.

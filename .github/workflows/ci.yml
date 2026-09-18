@@ -12,26 +12,65 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    strategy:
+      # Both targets are reported even when one fails: an ARM64 break that
+      # cancelled the x64 job would hide whether the problem is the change or
+      # the architecture.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            name: x64
+          # Cross-compiled from the x64 runner, which is why the build script
+          # picks `rc.exe` by *host* architecture rather than target: a `.res`
+          # is architecture-neutral, and the ARM64 copy of the tool cannot run
+          # here. Getting that wrong does not fail the build — it silently
+          # ships an .exe with no icon.
+          - target: aarch64-pc-windows-msvc
+            name: arm64
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Check
-        run: cargo check --lib
+        run: cargo check --lib --target ${{ matrix.target }}
 
+      # Only on the native target: the runner is x64, so an ARM64 test binary
+      # has nothing to run on. The tests worth having here are pure logic
+      # anyway — `alert.rs`, `usage.rs`, `config.rs` — and those are not where
+      # an architecture difference would show up.
       - name: Tests
+        if: matrix.target == 'x86_64-pc-windows-msvc'
         run: cargo test
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Fails the build rather than warning, because the icon going missing is
+      # exactly the kind of regression that survives review: the .exe still
+      # works, it just looks unfinished in the tray and on the taskbar.
+      - name: Check the icon was embedded
+        shell: pwsh
+        run: |
+          $exe = "target/${{ matrix.target }}/release/arbotray.exe"
+          $size = (Get-Item $exe).Length
+          Write-Host "$exe is $size bytes"
+          if ($size -lt 450KB) {
+            Write-Error "arbotray.exe looks too small to contain the icon ($size bytes) - did rc.exe fail?"
+            exit 1
+          }
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: arbotray
-          path: target/release/arbotray.exe
+          name: arbotray-${{ matrix.name }}
+          path: target/${{ matrix.target }}/release/arbotray.exe

@@ -69,7 +69,14 @@ pub struct WindowState {
     /// Decides which samples earn a balloon notification. Held across ticks
     /// because the rules are all about what already happened — a fresh value
     /// each sample would announce the same 90% once a second.
-    pub alerts: Alerts,
+    ///
+    /// Shared rather than owned, because this window is *not* the longest-lived
+    /// thing here: an Explorer restart destroys it and the supervisor builds
+    /// another. Rebuilding the alert state with it would forget every threshold
+    /// already announced, so a machine at 95% of plan would balloon again on
+    /// every Explorer restart — and the cooldown protecting the rate alert
+    /// would reset with it.
+    pub alerts: Arc<Mutex<Alerts>>,
 }
 
 /// Window procedure for the docked tray child.
@@ -121,12 +128,24 @@ pub unsafe extern "system" fn wnd_proc(
                 }
                 if let Some(icon) = &mut state.icon {
                     icon.set_tip(&state.model.tooltip());
-                    if let Some(b) = state.alerts.poll(
-                        &state.cfg.notify,
-                        state.model.quota_pct,
-                        state.model.rx_bps,
-                        std::time::Instant::now(),
-                    ) {
+                    // A poisoned lock still has usable state behind it, and
+                    // the alternative is a tray that has silently stopped
+                    // warning about the data plan.
+                    let decision = match state.alerts.lock() {
+                        Ok(mut a) => a.poll(
+                            &state.cfg.notify,
+                            state.model.quota_pct,
+                            state.model.rx_bps,
+                            std::time::Instant::now(),
+                        ),
+                        Err(poisoned) => poisoned.into_inner().poll(
+                            &state.cfg.notify,
+                            state.model.quota_pct,
+                            state.model.rx_bps,
+                            std::time::Instant::now(),
+                        ),
+                    };
+                    if let Some(b) = decision {
                         icon.balloon(&b);
                     }
                 }

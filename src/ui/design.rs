@@ -279,6 +279,20 @@ pub(crate) const ICON_STOPWATCH: u16 = 0xE916;
 /// stem above it at 16 pixels.
 pub(crate) const ICON_TIMER: u16 = 0xE823;
 
+/// A lowercase `i` in a ring, for the About page.
+///
+/// Checked against the rendered glyph rather than a chart, and the check had to
+/// go further than usual: `0xE783` (Error) is the same ring with the same ink,
+/// the same bounding box, the same symmetry and the same hole count — the two
+/// differ only in the mark inside. Measuring the mark's runs top to bottom
+/// settles it: this one is a 5px dot above a 15px stem, and `0xE783` is a 15px
+/// stem above a 5px dot. Shipping the wrong one would put an error badge on a
+/// page that is only telling you the version.
+pub(crate) const ICON_ABOUT: u16 = 0xE946;
+
+/// A link glyph, for the repository and licence rows on the About page.
+pub(crate) const ICON_LINK: u16 = 0xE71B;
+
 /// The dark-mode glyph, for the button that puts the window in one.
 ///
 /// One constant rather than a sun/moon pair: the button says what it switches
@@ -382,6 +396,7 @@ pub(crate) fn page_icon(page: usize) -> u16 {
         crate::ui::pages::STOPWATCH => ICON_STOPWATCH,
         crate::ui::pages::TIMER => ICON_TIMER,
         crate::ui::pages::SETTINGS => ICON_SETTINGS,
+        crate::ui::pages::ABOUT => ICON_ABOUT,
         // Not reachable: the page is clamped to `PAGES` before it gets here.
         // The overview's glyph is a better answer than a blank column anyway.
         _ => ICON_OVERVIEW,

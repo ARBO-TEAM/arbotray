@@ -247,6 +247,7 @@ pub(crate) unsafe fn tick(
     text: &str,
     checked: bool,
     enabled: bool,
+    focused: bool,
     pal: &Palette,
     dpi: u32,
 ) {
@@ -278,6 +279,32 @@ pub(crate) unsafe fn tick(
         } else {
             rounded_fill(dc, mark, radius, pal.field);
             rounded_stroke(dc, mark, radius, if enabled { pal.edge } else { pal.muted });
+        }
+        // The keyboard's position, drawn around the whole row rather than
+        // around the box.
+        //
+        // `BS_OWNERDRAW` hands us the entire face, including the focus
+        // rectangle the system would otherwise draw — so without this the tile
+        // grid is eight stops that look identical under Tab: the caret is
+        // somewhere in the column and the only way to find it is to press Space
+        // and see what changed.
+        //
+        // Around the row and not the box for two reasons: a ring drawn outside
+        // a box that starts at `rect.left` falls outside the control's own
+        // client area and is clipped away, and a checked box is a filled accent
+        // square with no room inside it for a second mark that is not the tick.
+        // The row also matches what Space actually acts on, caption included.
+        if focused && enabled {
+            let ring = RECT {
+                left: rect.left,
+                top: rect.top,
+                // A stroke sits *on* its rectangle, so the last row and column
+                // of pixels have to be inside the client area or the right and
+                // bottom edges are shaved off and the ring reads as an L.
+                right: rect.right - 1,
+                bottom: rect.bottom - 1,
+            };
+            rounded_stroke(dc, ring, scale(CTL_RADIUS, dpi), pal.accent);
         }
         if !text.is_empty() {
             SetTextColor(dc, if enabled { pal.text } else { pal.muted });

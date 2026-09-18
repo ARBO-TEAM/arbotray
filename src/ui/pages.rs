@@ -10,7 +10,7 @@ use crate::taskbar::TrayModel;
 /// `Settings` is **appended**. These indices are positional, so inserting it
 /// anywhere but the end would renumber every page after it — the labels would
 /// still read correctly and the routing would be wrong.
-pub(crate) const PAGES: [&str; 9] = [
+pub(crate) const PAGES: [&str; 10] = [
     "Overview",
     "Network",
     "System",
@@ -20,6 +20,7 @@ pub(crate) const PAGES: [&str; 9] = [
     "Stopwatch",
     "Timer",
     "Settings",
+    "About",
 ];
 pub(crate) const OVERVIEW: usize = 0;
 pub(crate) const NETWORK: usize = 1;
@@ -30,6 +31,9 @@ pub(crate) const SPEEDTEST: usize = 5;
 pub(crate) const STOPWATCH: usize = 6;
 pub(crate) const TIMER: usize = 7;
 pub(crate) const SETTINGS: usize = 8;
+/// Appended after `Settings`, per the rule above. Last in the sidebar because
+/// it is the page a reader visits once and the others are visited daily.
+pub(crate) const ABOUT: usize = 9;
 
 // --- pages ----------------------------------------------------------------
 //
@@ -201,6 +205,57 @@ pub(crate) fn month_label(model: &TrayModel) -> &'static str {
     } else {
         "Month"
     }
+}
+
+/// What this build is, for the About page's first card.
+///
+/// The architecture is read from `cfg!(target_arch)` rather than from the
+/// running process, because that is the question worth answering: an ARM64
+/// machine can run the x64 build under emulation, and a user wondering why it
+/// feels slow needs to see which binary they actually downloaded.
+pub(crate) fn about_build() -> Vec<(&'static str, String)> {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "ARM64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "x86") {
+        "x86"
+    } else {
+        // Not reachable through any shipped target, and naming it beats an
+        // empty row if one is ever added.
+        "unknown"
+    };
+    vec![
+        ("Version", crate::update::current().to_string()),
+        ("Architecture", arch.to_string()),
+        // Stated because it is the product's whole claim. A reader comparing
+        // this against the alternatives is comparing this number.
+        ("Binary", "single file, no runtime".to_string()),
+    ]
+}
+
+/// Where this came from and what may be done with it.
+pub(crate) fn about_project() -> Vec<(&'static str, String)> {
+    vec![
+        ("Licence", "MIT — free, no gate".to_string()),
+        ("Source", "github.com/ARBO-TEAM/arbotray".to_string()),
+        ("Downloads", crate::update::DOWNLOADS.to_string()),
+    ]
+}
+
+/// Where the readings come from.
+///
+/// Every line names a Win32 API rather than describing the feature, because a
+/// monitor that will not say where its numbers come from is asking to be
+/// trusted on the strength of the numbers looking plausible.
+pub(crate) fn about_sources() -> Vec<(&'static str, String)> {
+    vec![
+        ("Traffic", "GetIfTable2 — hardware interfaces".to_string()),
+        ("Latency", "ICMP echo to the gateway".to_string()),
+        ("CPU / RAM", "GetSystemTimes, GlobalMemoryStatusEx".to_string()),
+        ("Wi-Fi", "WLAN API".to_string()),
+        ("Ports", "GetExtendedTcpTable / UdpTable".to_string()),
+    ]
 }
 
 /// `"41%"` → `0.41`. Strips the sign, parses, clamps; unparseable → `0.0`.
@@ -386,5 +441,71 @@ mod tests {
         };
         assert!(health_rows(&quiet).is_empty());
         assert_eq!(health_rows(&full()).len(), 2, "and both rows when both report");
+    }
+
+    #[test]
+    fn the_about_page_names_the_running_build() {
+        // The version has to be this binary's own, not a string typed into the
+        // page: an About page that has to be edited by hand at release time is
+        // an About page that will eventually be wrong.
+        let build = about_build();
+        let version = build
+            .iter()
+            .find(|(l, _)| *l == "Version")
+            .map(|(_, v)| v.clone())
+            .expect("About names a version");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
+
+        // The architecture is the reason this page earns its keep on ARM64:
+        // an x64 build running under emulation has to be able to say so.
+        let arch = build
+            .iter()
+            .find(|(l, _)| *l == "Architecture")
+            .map(|(_, v)| v.clone())
+            .expect("About names an architecture");
+        assert!(
+            ["x64", "ARM64", "x86"].contains(&arch.as_str()),
+            "unexpected architecture {arch}"
+        );
+    }
+
+    #[test]
+    fn the_about_page_states_the_licence_and_where_to_get_it() {
+        let project = about_project();
+        let licence = project.iter().find(|(l, _)| *l == "Licence").unwrap();
+        // MIT is what LICENSE.md says; the two disagreeing is the failure worth
+        // catching, since only one of them is legally the answer.
+        assert!(licence.1.contains("MIT"), "licence row reads {:?}", licence.1);
+        // "Every feature is free; nothing is gated" is the project's own claim,
+        // so the page that states the terms is where it has to hold.
+        assert!(licence.1.contains("no gate"));
+
+        let downloads = project.iter().find(|(l, _)| *l == "Downloads").unwrap();
+        assert_eq!(downloads.1, crate::update::DOWNLOADS);
+    }
+
+    #[test]
+    fn every_about_row_has_something_beside_its_label() {
+        // These cards are built from fixed lists rather than from a model, so
+        // an empty value is a typo rather than a missing reading — and unlike
+        // the live pages, nothing here filters blanks out before painting.
+        for (card, rows) in [
+            ("build", about_build()),
+            ("project", about_project()),
+            ("sources", about_sources()),
+        ] {
+            assert!(!rows.is_empty(), "{card} card has no rows");
+            for (label, value) in rows {
+                assert!(!label.is_empty(), "{card} card has a row with no label");
+                assert!(!value.trim().is_empty(), "{card} row {label:?} has no value");
+            }
+        }
+    }
+
+    #[test]
+    fn the_about_page_has_no_chart() {
+        // It is three lists of constants; there is no history behind them for
+        // a sparkline to draw.
+        assert!(!page_shows_graph(ABOUT));
     }
 }

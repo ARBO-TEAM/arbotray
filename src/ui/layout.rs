@@ -41,7 +41,27 @@ pub(crate) const TITLE_PAD: i32 = 12;
 /// the window — `Processor` beside `AMD Ryzen 5 7600 6-Core Processor` — no
 /// longer fit and would have been ellipsised, so the floor moved out with them.
 pub(crate) const MIN_W: i32 = 660;
-pub(crate) const MIN_H: i32 = 340;
+
+/// The floor is the sidebar's own height, not a number chosen beside it.
+///
+/// It was a literal 340 until a tenth page was added, at which point the list
+/// needed 352 and the last entry fell under the frame — clickable nowhere,
+/// visible nowhere, and nothing in the build able to notice. Derived now, so
+/// the eleventh page moves the floor by itself.
+pub(crate) const MIN_H: i32 = sidebar_min_h();
+
+/// Height the page list needs: its top inset plus one band per page.
+///
+/// `const fn` so it is computed at compile time and can sit in a `const` — the
+/// point is that no build can exist in which this disagrees with the sidebar.
+const fn sidebar_min_h() -> i32 {
+    let list = crate::ui::sidebar::TOP
+        + crate::ui::design::ITEM_H * crate::ui::pages::PAGES.len() as i32;
+    // A window shorter than its own content is unusable, but so is one with no
+    // room for the content beside the list; 340 was the tested comfortable
+    // floor for the pages themselves, so the taller of the two wins.
+    if list > 340 { list } else { 340 }
+}
 
 /// Initial size: room for the rows plus a decent sparkline.
 ///

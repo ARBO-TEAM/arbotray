@@ -37,7 +37,13 @@ pub fn run() -> i32 {
     // dashboard, which starts runs.
     let speed = SpeedTest::new();
 
-    let (mut tray, notifier) = match attach_with_retry(&cfg, speed.clone()) {
+    // Owned here rather than by the window, because the window is rebuilt on
+    // every Explorer restart and this must not be. It records which thresholds
+    // have already been announced; forgetting that would re-announce a plan
+    // already at 95% each time Explorer came back.
+    let alerts = Arc::new(Mutex::new(crate::taskbar::alert::Alerts::new()));
+
+    let (mut tray, notifier) = match attach_with_retry(&cfg, speed.clone(), Arc::clone(&alerts)) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("arbotray: cannot attach to taskbar: {e}");
@@ -95,7 +101,7 @@ pub fn run() -> i32 {
         // been edited through the Settings page since, and a rebuilt window
         // that reverted the user's settings would look like data loss.
         let cfg = Config::load();
-        match attach_with_retry(&cfg, speed.clone()) {
+        match attach_with_retry(&cfg, speed.clone(), Arc::clone(&alerts)) {
             Ok((fresh_tray, fresh_notifier)) => {
                 // Point the *existing* telemetry thread at the new window
                 // before running its loop, so the first sample after the
@@ -130,10 +136,14 @@ const ATTACH_RETRY: Duration = Duration::from_millis(250);
 ///
 /// The last error is what comes back, so a genuine failure still names itself
 /// rather than reporting the first sighting.
-fn attach_with_retry(cfg: &Config, speed: SpeedTest) -> AttachResult<(Tray, Notifier)> {
+fn attach_with_retry(
+    cfg: &Config,
+    speed: SpeedTest,
+    alerts: Arc<Mutex<crate::taskbar::alert::Alerts>>,
+) -> AttachResult<(Tray, Notifier)> {
     let deadline = std::time::Instant::now() + ATTACH_TIMEOUT;
     loop {
-        match Tray::attach(cfg, speed.clone()) {
+        match Tray::attach(cfg, speed.clone(), Arc::clone(&alerts)) {
             Ok(pair) => return Ok(pair),
             Err(e) if std::time::Instant::now() >= deadline => return Err(e),
             Err(_) => std::thread::sleep(ATTACH_RETRY),

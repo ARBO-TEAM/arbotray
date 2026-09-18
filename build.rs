@@ -80,9 +80,15 @@ fn embed() -> Result<(), String> {
 
 /// Locate `rc.exe`.
 ///
-/// The SDK keeps one under `Windows Kits\10\bin\<version>\<arch>\`; we want the
-/// newest version and the architecture matching the target, since the resource
-/// is linked into that target's image.
+/// The SDK keeps one under `Windows Kits\10\bin\<version>\<arch>\`, where
+/// `<arch>` is the architecture the *tool* runs on — not the one it builds for.
+/// A `.res` file is architecture-neutral, so the host's copy is the right one
+/// for every target.
+///
+/// An earlier revision picked `<arch>` from the target instead, which worked
+/// only because every target was x64. Cross-compiling to `aarch64` found the
+/// SDK's ARM64 `rc.exe` and tried to run it on an x64 host, which fails with
+/// error 216 — the build still succeeded, but silently shipped without an icon.
 fn find_rc(target: &str) -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("RC") {
         let path = PathBuf::from(explicit);
@@ -90,14 +96,11 @@ fn find_rc(target: &str) -> Option<PathBuf> {
             return Some(path);
         }
     }
+    // `target` is deliberately unused for the directory choice; it is still
+    // taken so callers cannot accidentally ask for a non-Windows build.
+    let _ = target;
 
-    let arch = if target.starts_with("aarch64") {
-        "arm64"
-    } else if target.starts_with("i686") {
-        "x86"
-    } else {
-        "x64"
-    };
+    let arch = host_arch();
 
     let kits = PathBuf::from(std::env::var_os("ProgramFiles(x86)")?)
         .join("Windows Kits")
@@ -119,14 +122,39 @@ fn find_rc(target: &str) -> Option<PathBuf> {
         .rev()
         .map(|version| version.join(arch).join("rc.exe"))
         .find(|candidate| candidate.is_file())
-        .or_else(|| newest_rc_anywhere(&versions))
+        .or_else(|| newest_rc_anywhere(&versions, arch))
 }
 
-/// Last resort: an SDK installed for a different host architecture still
-/// produces a resource the linker can use.
-fn newest_rc_anywhere(versions: &[PathBuf]) -> Option<PathBuf> {
+/// The architecture this build script is *running* on, as the SDK spells it.
+///
+/// `HOST` is set by cargo and is the only reliable answer when cross-compiling;
+/// `cfg!` here would describe the build script's own target, which is the same
+/// thing today but stops being so under `-Zbuild-std` and similar.
+fn host_arch() -> &'static str {
+    let host = std::env::var("HOST").unwrap_or_default();
+    if host.starts_with("aarch64") {
+        "arm64"
+    } else if host.starts_with("i686") {
+        "x86"
+    } else {
+        "x64"
+    }
+}
+
+/// Last resort: any `rc.exe` that will actually run here.
+///
+/// The host's own architecture is tried first and the others after, because an
+/// x64 host can run an x86 `rc.exe` under WOW64 and an ARM64 host can run both
+/// under emulation — but the reverse is error 216, which is what this ordering
+/// exists to avoid.
+fn newest_rc_anywhere(versions: &[PathBuf], host: &str) -> Option<PathBuf> {
+    let order: [&str; 3] = match host {
+        "arm64" => ["arm64", "x64", "x86"],
+        "x86" => ["x86", "x64", "arm64"],
+        _ => ["x64", "x86", "arm64"],
+    };
     for version in versions.iter().rev() {
-        for arch in ["x64", "x86", "arm64"] {
+        for arch in order {
             let candidate = version.join(arch).join("rc.exe");
             if candidate.is_file() {
                 return Some(candidate);

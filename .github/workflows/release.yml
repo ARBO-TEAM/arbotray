@@ -29,6 +29,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -36,30 +38,49 @@ jobs:
       - name: Tests
         run: cargo test
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build x64
+        run: cargo build --release --target x86_64-pc-windows-msvc
 
-      - name: Stage the binary
+      # Cross-compiled from this x64 runner. Both architectures ship from one
+      # job so a release can never contain one without the other — a half
+      # release is worse than a late one, because the download page implies
+      # both were built from the same commit.
+      - name: Build arm64
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: Stage the binaries
         shell: pwsh
-        # Renamed to carry the version: people end up with several copies of
-        # this file in Downloads, and `arbotray.exe` twice is a guessing game.
+        # Renamed to carry the version *and* the architecture: people end up
+        # with several copies of this file in Downloads, and `arbotray.exe`
+        # twice is a guessing game — one that now has a wrong answer that
+        # refuses to start rather than merely being stale.
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/arbotray.exe "dist/arbotray-$tag-x86_64.exe"
+          Copy-Item target/x86_64-pc-windows-msvc/release/arbotray.exe "dist/arbotray-$tag-x86_64.exe"
+          Copy-Item target/aarch64-pc-windows-msvc/release/arbotray.exe "dist/arbotray-$tag-arm64.exe"
+          # An .exe that lost its icon is still a working .exe, so nothing else
+          # in this pipeline would notice. Checked here because a release is
+          # the one artefact that cannot be quietly replaced.
+          foreach ($f in Get-ChildItem dist) {
+            if ($f.Length -lt 450KB) {
+              Write-Error "$($f.Name) is only $($f.Length) bytes - the icon is probably missing"
+              exit 1
+            }
+          }
           Get-ChildItem dist | Format-Table Name, Length
 
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # A tag push makes the release; a manual run only refreshes the binary
+        # A tag push makes the release; a manual run only refreshes the binaries
         # on an existing one. `--clobber` makes a re-run idempotent.
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          $exe = "dist/arbotray-$tag-x86_64.exe"
+          $files = @("dist/arbotray-$tag-x86_64.exe", "dist/arbotray-$tag-arm64.exe")
           if (gh release view $tag 2>$null) {
-            gh release upload $tag $exe --clobber
+            gh release upload $tag @files --clobber
           } else {
-            gh release create $tag $exe --title $tag --generate-notes
+            gh release create $tag @files --title $tag --generate-notes
           }

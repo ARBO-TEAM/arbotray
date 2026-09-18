@@ -6,7 +6,7 @@ All features are available to every user — there is no free tier, no premium t
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
 
-Tree today: 19,557 lines of Rust across `src/`, **267 tests passing, 2 ignored**.
+Tree today: 19,889 lines of Rust across `src/`, **272 tests passing, 2 ignored**.
 
 ## Summary
 
@@ -37,7 +37,7 @@ Tree today: 19,557 lines of Rust across `src/`, **267 tests passing, 2 ignored**
 
 Counts: **17 Done, 1 Partial, 4 Not done** — 22 rows, counted from the table above, which is the authority.
 
-The nine pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8). The `OVERVIEW`/`NETWORK`/…/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
+The ten pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8), `About` (9). The `OVERVIEW`/`NETWORK`/…/`ABOUT` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke. The window's `MIN_H` is derived from this list rather than written beside it: the tenth page overran the old literal floor and left the last entry under the frame.
 
 ## Done
 

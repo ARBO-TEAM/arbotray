@@ -17,9 +17,11 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_TAB;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GetMessageW,
-    GetWindowRect, MSG, RegisterClassW, TranslateMessage, WM_APP,
+    GetWindowRect, IsDialogMessageW, IsWindow, MSG, RegisterClassW, TranslateMessage, WM_APP,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
     WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_VISIBLE,
 };
 use windows::core::w;
@@ -39,7 +41,9 @@ const RESERVED_HISTORY: usize = 60;
 pub struct Tray {
     hwnd: HWND,
     /// Kept boxed so its address is stable for `GWLP_USERDATA`.
-    #[allow(dead_code)]
+    ///
+    /// Read directly as well as through that pointer: the message loop needs
+    /// the dashboard's handle to route keyboard navigation to it.
     state: Box<WindowState>,
     /// Whether the loop ended because the user asked it to. See
     /// [`Tray::user_quit`].
@@ -137,7 +141,16 @@ impl Tray {
     /// run. It is the same handle the telemetry thread reads, because a run
     /// started from the button and a run reported in the model have to be the
     /// same run.
-    pub fn attach(cfg: &Config, speed: SpeedTest) -> AttachResult<(Self, Notifier)> {
+    /// Attach to the taskbar, carrying alert state that outlives this window.
+    ///
+    /// `alerts` is passed in rather than created here because an Explorer
+    /// restart rebuilds the window: state created here would be state forgotten
+    /// on every restart. See `WindowState::alerts`.
+    pub fn attach(
+        cfg: &Config,
+        speed: SpeedTest,
+        alerts: Arc<Mutex<crate::taskbar::alert::Alerts>>,
+    ) -> AttachResult<(Self, Notifier)> {
         use windows::Win32::Foundation::GetLastError;
         // SAFETY: every call here passes live locals or well-known strings.
         unsafe {
@@ -185,7 +198,7 @@ impl Tray {
                 // because `create` needs the window's own `HINSTANCE`, which is
                 // the same module handle but reads better named once.
                 widget: None,
-                alerts: crate::taskbar::alert::Alerts::new(),
+                alerts,
             });
 
             // Reserve width from a worst-case sample so changing digits never
@@ -274,6 +287,39 @@ impl Tray {
         // our own `WndProc` posts.
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // Keyboard navigation for the dashboard.
+                //
+                // Tab between controls is not something a window gets for
+                // free: `WS_TABSTOP` only marks which controls take part, and
+                // the walk itself lives in `IsDialogMessageW`. Every control on
+                // the Settings page carried the style and none of them could be
+                // reached from the keyboard, because this loop dispatched Tab
+                // straight to the focused control, which ignored it.
+                //
+                // Narrowed to Tab on purpose. `IsDialogMessageW` also claims
+                // Escape, Enter and the arrow keys, and this window already
+                // means something by all three: Escape answers the power-timer
+                // confirmation, the arrows move between pages in the sidebar,
+                // and neither survives being turned into `IDCANCEL` and
+                // `IDOK` sent to a `WM_COMMAND` handler that routes by control
+                // id. Space and Enter on a focused button need no help — the
+                // button class handles those itself.
+                //
+                // Guarded on the panel being alive: the call needs a real
+                // window, and the dashboard is built lazily, so for most of a
+                // session there is nothing to route to.
+                let panel = self.state.ui;
+                let tab = (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)
+                    && msg.wParam.0 as u16 == VK_TAB.0;
+                if tab
+                    && !panel.is_invalid()
+                    && IsWindow(Some(panel)).as_bool()
+                    && IsDialogMessageW(panel, &msg).as_bool()
+                {
+                    // Consumed — dispatching it as well would deliver the key
+                    // twice.
+                    continue;
+                }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }

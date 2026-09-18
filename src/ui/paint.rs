@@ -11,15 +11,16 @@ use crate::ui::components::{
     Canvas, Fonts, card_h, empty_h, head_h, hero_h, lane_h, meter_h, rounded_fill,
 };
 use crate::ui::design::{
-    CARD_PAD, FIELD_INSET, ICON_DATA, ICON_DESKTOP, ICON_LATENCY, ICON_LIVE, ICON_MACHINE,
+    CARD_PAD, FIELD_INSET, ICON_ABOUT, ICON_DATA, ICON_DESKTOP, ICON_LATENCY, ICON_LINK,
+    ICON_LIVE, ICON_MACHINE,
     ICON_MEMORY, ICON_NETWORK, ICON_PORTS, ICON_SPEED, ICON_STOPWATCH, ICON_STORAGE, ICON_TIMER,
     ICON_TILES, ICON_TRAFFIC, ICON_TUNE, ICON_UP, ICON_DOWN, ICON_USAGE, RADIUS, S2, S3, palette,
 };
 use crate::power;
 use crate::ui::consts::{CTL_H, FIELD_W};
 use crate::ui::pages::{
-    DATA, NETWORK, OVERVIEW, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER,
-    connection_rows, health_rows, page_shows_graph,
+    ABOUT, DATA, NETWORK, OVERVIEW, PAGES, PORTS, SETTINGS, SPEEDTEST, STOPWATCH, SYSTEM, TIMER,
+    about_build, about_project, about_sources, connection_rows, health_rows, page_shows_graph,
     pct_of, socket_rows, usage_rows, usage_totals,
 };
 use crate::ui::settings::{
@@ -29,7 +30,7 @@ use crate::ui::settings::{
 };
 use crate::ui::theme::scale;
 use crate::ui::{PAD, ROW_H, SPARK_GAP, TITLE_EXTRA, TITLE_PAD, VALUE_OFFSET, UiState};
-use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DEFAULT_GUI_FONT, DeleteObject, FillRect, GetDC, GetStockObject, HGDIOBJ,
     MapWindowPoints, NULL_BRUSH, ReleaseDC, SelectObject, SetBkMode, TRANSPARENT,
@@ -845,6 +846,47 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                     pal.danger
                 };
                 c.note(notice, colour);
+            }
+        }
+
+        if page == ABOUT {
+            let dpi = state.dpi;
+            c.subtitle("What this is, where it came from, and where its numbers come from");
+
+            // Three cards in the order a reader needs them: what you are
+            // running, then what you may do with it, then why you should
+            // believe it.
+            let cards: [(u16, COLORREF, &str, Vec<(&str, String)>); 3] = [
+                (ICON_ABOUT, pal.tile_blue, "Build", about_build()),
+                (ICON_LINK, pal.tile_green, "Project", about_project()),
+                (
+                    ICON_LIVE,
+                    pal.tile_violet,
+                    "Where the readings come from",
+                    about_sources(),
+                ),
+            ];
+            for (glyph, tint, title, rows) in &cards {
+                let inner = head_h(dpi) + rows.len() as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, *glyph, *tint, title, "");
+                    for (label, value) in rows {
+                        c.row(label, value);
+                    }
+                });
+            }
+
+            // Only when there is one, for the same reason the System page gives:
+            // a page that says "you are up to date" every time you open it has
+            // taught you to stop reading it.
+            if let Some(version) = crate::update::available() {
+                c.note(
+                    &format!(
+                        "Version {version} is available \u{2014} {}",
+                        crate::update::DOWNLOADS
+                    ),
+                    pal.accent,
+                );
             }
         }
 

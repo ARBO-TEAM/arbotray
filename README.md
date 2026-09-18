@@ -8,6 +8,8 @@ Pure Rust, native Win32 — target binary < 3 MB, no garbage collection, no cons
 
 Grab the latest binary from [Releases](../../releases/latest) and run it. It is a single self-contained `.exe` — no installer, no runtime, no dependencies.
 
+Two builds are published: `-x86_64` for ordinary PCs and `-arm64` for Windows on ARM machines such as the Surface Pro X or a Snapdragon X laptop. An ARM64 machine will run the x64 build under emulation, so if it starts but feels heavier than it should, check the **About** page — it names the architecture of the binary actually running.
+
 ```
 arbotray.exe
 ```
@@ -56,7 +58,7 @@ The binary lands at `target/release/arbotray.exe` (~485 KB).
 
 Hovering the tray icon shows the full readout — every enabled field under its own label, the two rates under ↓ and ↑ — plus the connected network name, which is the one field too long for the taskbar. The lines are fitted to the tooltip, so the last one is dropped rather than clipped when a machine reports everything at once.
 
-Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, Network, System, Data, Ports, Speed Test, Stopwatch, Timer, Settings — over the same readings, plus a chart, a built-in speed test, a stopwatch and a sleep / shut-down timer. Every page is drawn as a stack of rounded cards, one per group of readings — on Settings that is a "Display Tiles" card for the tile checkboxes and a "Preferences" card for the form, and on the Timer page a "Power timer" card under the form, shown only when it clears the Arm button.
+Left-clicking the tray icon opens a dashboard: a sidebar of pages — Overview, Network, System, Data, Ports, Speed Test, Stopwatch, Timer, Settings, About — over the same readings, plus a chart, a built-in speed test, a stopwatch and a sleep / shut-down timer. Every page is drawn as a stack of rounded cards, one per group of readings — on Settings that is a "Display Tiles" card for the tile checkboxes and a "Preferences" card for the form, and on the Timer page a "Power timer" card under the form, shown only when it clears the Arm button.
 
 ## Config
 

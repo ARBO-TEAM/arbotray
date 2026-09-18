@@ -914,6 +914,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             &text,
                             s.checks.get(id),
                             enabled,
+                            focused,
                             &pal,
                             s.dpi,
                         );
@@ -1564,13 +1565,22 @@ mod tests {
         }
         assert_eq!(PAGES.first(), Some(&"Overview"), "the first page is the one shown");
         assert!(PAGES.len() > 1, "a one-page sidebar is not a sidebar");
-        // Settings has to be last: `OVERVIEW`..`DATA` are positional, so a page
-        // inserted before them renumbers every page after it.
-        assert_eq!(PAGES.last(), Some(&"Settings"));
-        assert_eq!(SETTINGS, PAGES.len() - 1);
-        for (i, name) in ["Overview", "Network", "System", "Data"].iter().enumerate() {
+        // Every page constant is positional, so a page *inserted* rather than
+        // appended renumbers every page after it: the labels still read right
+        // and the routing is silently wrong. Pinning each index by name is what
+        // catches that; pinning "Settings is last" only caught it by accident,
+        // and stopped the moment About was legitimately appended.
+        for (i, name) in [
+            "Overview", "Network", "System", "Data", "Ports", "Speed Test", "Stopwatch", "Timer",
+            "Settings", "About",
+        ]
+        .iter()
+        .enumerate()
+        {
             assert_eq!(&PAGES[i], name, "page {i} moved");
         }
+        assert_eq!(SETTINGS, 8);
+        assert_eq!(crate::ui::pages::ABOUT, PAGES.len() - 1);
     }
 
     #[test]
@@ -2083,6 +2093,25 @@ mod tests {
         assert!(MIN_H >= 200, "a floor under 200px is not a usable window");
         // The minimum has to leave room for the sidebar plus a value column.
         assert!(MIN_W > SIDEBAR_W * 2, "the floor would leave no content area");
+    }
+
+    #[test]
+    fn the_window_cannot_be_shrunk_past_its_own_page_list() {
+        // The floor was a literal for nine pages and a tenth page overran it:
+        // the last entry sat under the frame, unreachable and unpaintable, and
+        // nothing failed. The sidebar is the only thing in the window whose
+        // height is fixed by its content rather than scrolled or scaled, so it
+        // is the one thing the floor has to be derived from.
+        let needed = crate::ui::sidebar::TOP
+            + crate::ui::design::ITEM_H * crate::ui::pages::PAGES.len() as i32;
+        assert!(
+            MIN_H >= needed,
+            "MIN_H {MIN_H} clips the {}-entry sidebar, which needs {needed}",
+            crate::ui::pages::PAGES.len(),
+        );
+        // And the start size has to clear it too, or the window opens broken
+        // and only looks right once dragged.
+        assert!(START_H >= needed);
     }
 
     #[test]
