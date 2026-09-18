@@ -34,7 +34,7 @@ Tree today: 18,653 lines of Rust across `src/`, **243 tests passing, 2 ignored**
 | Update check | Done | `src/update.rs` — background check, version on the System page's "This machine" card, banner when a newer release exists |
 | Start with Windows | Done | `ROW_STARTUP` toggle writing the `Run` key |
 
-Counts: **15 Done, 4 Partial, 4 Not done** — 23 rows, counted from the table above, which is the authority.
+Counts: **14 Done, 3 Partial, 4 Not done** — 21 rows, counted from the table above, which is the authority.
 
 The nine pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8). The `OVERVIEW`/`NETWORK`/…/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
 
