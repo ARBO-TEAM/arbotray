@@ -249,11 +249,27 @@ pub(crate) fn month_label(model: &TrayModel) -> &'static str {
     }
 }
 
+/// `"41%"` → `0.41`. Strips the sign, parses, clamps; unparseable → `0.0`.
+///
+/// Shared by the Overview and System meters, so one string never means two
+/// things on two pages. It parses model strings, not GDI, which is why it lives
+/// with the rows rather than with the components.
+pub(crate) fn pct_of(text: &str) -> f32 {
+    text.trim()
+        .strip_suffix('%')
+        .unwrap_or(text.trim())
+        .trim()
+        .parse::<f32>()
+        .unwrap_or(0.0)
+        .clamp(0.0, 100.0)
+        / 100.0
+}
+
 /// Whether a page has anything for the sparkline to say. The traffic history
 /// belongs with the traffic figures, and the daily total is the same story at
 /// a coarser grain — the hardware and settings pages have no history to draw.
 pub(crate) fn page_shows_graph(page: usize) -> bool {
-    matches!(page, OVERVIEW | DATA)
+    matches!(page, DATA)
 }
 
 #[cfg(test)]

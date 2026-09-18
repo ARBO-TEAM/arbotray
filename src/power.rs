@@ -351,6 +351,19 @@ pub fn format_stamp(t: &SYSTEMTIME) -> String {
     )
 }
 
+/// The date for the Overview pill: `18 Sep 2026`.
+///
+/// From the same `GetLocalTime` fields as `format_stamp`, shortened to what a
+/// pill has room for. No chrono: this is twelve month names, not a dependency.
+pub fn today_label() -> String {
+    let t = now();
+    const MON: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let m = MON[t.wMonth.saturating_sub(1).min(11) as usize];
+    format!("{:02} {} {:04}", t.wDay, m, t.wYear)
+}
+
 /// The instant a stamp names, or `None` for anything else.
 ///
 /// A date that does not exist is refused rather than rolled forward. February
