@@ -11,12 +11,16 @@
 //! rectangle, a hairline, a glyph and a label-value pair, which is everything
 //! the four metric pages and the settings page are actually made of.
 
-use crate::ui::design::{GROUP_COL, ICON_COL, Palette, RADIUS, S1, S2, S3, S6};
+use crate::ui::design::{
+    CARD_PAD, CARD_RADIUS, CHIP, CHIP_TINT_PCT, GROUP_COL, ICON_CALENDAR, ICON_COL, LANE_GAP,
+    Palette, RADIUS, S1, S2, S3, S6, TILE_H, TRACK_H,
+};
+use crate::ui::theme::scale;
 use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_WORDBREAK, DeleteObject, DrawTextW, GetStockObject, HDC, HGDIOBJ, HFONT, NULL_PEN, PS_SOLID,
-    Polyline, RoundRect, SelectObject, SetTextColor,
+    DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, DT_WORDBREAK, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, GetStockObject,
+    HDC, HGDIOBJ, HFONT, NULL_PEN, PS_SOLID, Polyline, RoundRect, SelectObject, SetTextColor,
 };
 
 /// The row height is generous on purpose: a single-line `DrawTextW` clips at the
@@ -56,6 +60,42 @@ pub(crate) unsafe fn draw(
     unsafe {
         SelectObject(dc, HGDIOBJ(font.0));
         DrawTextW(dc, &mut wide, &mut rect, DT_SINGLELINE | DT_NOPREFIX | align);
+    }
+}
+
+/// One run of text centred inside `rect` rather than starting at a point.
+///
+/// The sibling `draw` cannot do this: it lays text out from the top of a
+/// rectangle whose bottom it does not care about, which is right for a row's
+/// band and wrong for a chip, where the glyph has to sit in the middle of a
+/// shape whose height is the shape's own business. `DT_VCENTER` earns its keep
+/// here and only here — it centres against the rectangle, so the caller never
+/// measures a glyph's height, which is not a number GDI will hand over anyway.
+///
+/// # Safety
+/// `dc` must be a live DC and `font` a live font.
+pub(crate) unsafe fn draw_in(
+    dc: HDC,
+    font: HFONT,
+    text: &str,
+    rect: RECT,
+    align: windows::Win32::Graphics::Gdi::DRAW_TEXT_FORMAT,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = rect;
+    // SAFETY: the font and DC are the caller's, both live; `wide` and `rect`
+    // outlive the call.
+    unsafe {
+        SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(
+            dc,
+            &mut wide,
+            &mut rect,
+            DT_SINGLELINE | DT_NOPREFIX | DT_VCENTER | DT_CENTER | align,
+        );
     }
 }
 
@@ -131,6 +171,99 @@ pub(crate) unsafe fn rounded_fill(dc: HDC, rect: RECT, radius: i32, colour: COLO
     }
 }
 
+/// A glyph in a tinted plate: the mark a card or a tile leads with.
+///
+/// Plate and glyph are one call because they are one object. The tint exists
+/// only to lift the glyph off whatever it is standing on, so a plate drawn by
+/// one line and a glyph centred by another is two places to be wrong about the
+/// same shape — and the failure is a glyph half out of its own chip, which
+/// reads as a rendering fault rather than as a misplaced number.
+///
+/// `circle` picks the shape: a stat tile's mark is a circle and a card's is a
+/// rounded square, and the two appear in the same window, so the shape is part
+/// of what tells a group heading from a reading.
+///
+/// # Safety
+/// `dc` must be a live DC and `font` the icon face.
+pub(crate) unsafe fn chip(
+    dc: HDC,
+    font: HFONT,
+    cp: u16,
+    rect: RECT,
+    tint: COLORREF,
+    surface: COLORREF,
+    circle: bool,
+    dpi: u32,
+) {
+    let radius = if circle {
+        // A circle is a rounded rectangle with the radius at its limit, which
+        // keeps this to one `RoundRect` rather than a second ellipse path.
+        (rect.bottom - rect.top) / 2
+    } else {
+        crate::ui::theme::scale(RADIUS, dpi)
+    };
+    // SAFETY: `rounded_fill` and `draw_in` each document their own contract.
+    unsafe {
+        rounded_fill(dc, rect, radius, crate::ui::design::mix(surface, tint, CHIP_TINT_PCT));
+        SetTextColor(dc, tint);
+        draw_in(dc, font, &String::from_utf16_lossy(&[cp]), rect, DT_LEFT);
+    }
+}
+
+/// The width `text` needs in `font`, in pixels.
+///
+/// `DT_CALCRECT` writes the box the text would occupy into the rectangle it is
+/// given, which is the only way GDI hands over a width — it has no measure call
+/// of its own. A null DC (the tests) answers zero, which is fine: the one caller
+/// is a pill's own width.
+///
+/// # Safety
+/// `dc` must be a live DC and `font` a live font.
+unsafe fn text_w(dc: HDC, font: HFONT, text: &str) -> i32 {
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT::default();
+    // SAFETY: the font and DC are the caller's, both live; `wide` and `rect`
+    // outlive the call.
+    unsafe {
+        SelectObject(dc, HGDIOBJ(font.0));
+        DrawTextW(
+            dc,
+            &mut wide,
+            &mut rect,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
+    }
+    rect.right - rect.left
+}
+
+// --- card metrics ---------------------------------------------------------
+//
+// A card's height is the caller's, and the sum of what its body draws has to be
+// exactly that height — a card whose contents overrun it draws its last row
+// through its own bottom edge. These four functions are that sum written once,
+// so the painter computing a height and the card drawing its contents are the
+// same expression rather than two that happen to agree today.
+
+/// The head a card leads with: the chip and the gap under it.
+pub(crate) fn head_h(dpi: u32) -> i32 {
+    scale(CHIP, dpi) + scale(S2, dpi)
+}
+
+/// One stat lane, gap included.
+pub(crate) fn lane_h(dpi: u32) -> i32 {
+    scale(TILE_H, dpi) + scale(S2, dpi)
+}
+
+/// One meter row, gap included.
+pub(crate) fn meter_h(row_h: i32, dpi: u32) -> i32 {
+    row_h + scale(TRACK_H, dpi) + scale(S2, dpi)
+}
+
+/// A card's outer height, from the height of what goes inside it.
+pub(crate) fn card_h(dpi: u32, content: i32) -> i32 {
+    scale(2 * CARD_PAD, dpi) + content
+}
+
 /// A one-pixel horizontal rule from `x0` to `x1` at `y`.
 ///
 /// # Safety
@@ -189,7 +322,8 @@ pub(crate) struct Canvas<'a> {
     pub(crate) dc: HDC,
     pub(crate) fonts: &'a Fonts,
     pub(crate) pal: &'a Palette,
-    /// Content column.
+    /// Content column. A card moves this inward for its own contents, so it is
+    /// where the *next* component draws rather than where the page began.
     pub(crate) x0: i32,
     pub(crate) x1: i32,
     /// Where the next component starts.
@@ -547,6 +681,299 @@ impl<'a> Canvas<'a> {
         }
         self.y += self.row_h;
     }
+
+    // --- the card components -------------------------------------------------
+
+    /// A muted line under the page title saying what the page is for.
+    ///
+    /// One band, like a row, so the title block is a fixed height whether or not
+    /// a page has a subtitle to offer.
+    pub(crate) fn subtitle(&mut self, text: &str) {
+        // SAFETY: a live DC and faces owned by the caller's frame.
+        unsafe {
+            SetTextColor(self.dc, self.pal.muted);
+            draw(
+                self.dc,
+                self.fonts.body,
+                text,
+                self.x0,
+                self.y + self.nudge,
+                self.x1,
+                DT_LEFT,
+            );
+        }
+        self.y += self.row_h;
+    }
+
+    /// A rounded pill at the right edge of the current band: the date, on the
+    /// Overview page.
+    ///
+    /// Claims **no** space. It is drawn on the band the heading already owns —
+    /// the heading is a large face with air under it and the pill is a small
+    /// object, so the two share a band and the pill reads as belonging to the
+    /// title rather than as a row of its own.
+    pub(crate) fn date_pill(&mut self, dpi: u32, text: &str) {
+        let pad = scale(S3, dpi);
+        let glyph_w = scale(ICON_COL, dpi);
+        let h = scale(CHIP, dpi);
+        let top = self.y + scale(S1, dpi);
+        // Measured rather than estimated: a date is ten characters of digits and
+        // spaces whose width depends on the face, and a pill cut to a guessed
+        // width clips the year it exists to show.
+        // SAFETY: a live DC and the frame's body face.
+        let width = unsafe { text_w(self.dc, self.fonts.body, text) } + pad * 2 + glyph_w;
+        let right = self.x1;
+        let left = (right - width).max(self.x0);
+        let text_top = top + (h - self.row_h) / 2 + self.nudge;
+        // SAFETY: a live DC and faces owned by the caller's frame; `rounded_fill`
+        // and `glyph` each document their own contract.
+        unsafe {
+            rounded_fill(
+                self.dc,
+                RECT {
+                    left,
+                    top,
+                    right,
+                    bottom: top + h,
+                },
+                h / 2,
+                self.pal.card,
+            );
+            SetTextColor(self.dc, self.pal.muted);
+            glyph(self.dc, self.fonts.icon, ICON_CALENDAR, left + pad, text_top);
+            draw(
+                self.dc,
+                self.fonts.body,
+                text,
+                left + pad + glyph_w,
+                text_top,
+                right - pad,
+                DT_LEFT,
+            );
+        }
+    }
+
+    /// A card: a raised plate the contents are drawn on, and a gap after it.
+    ///
+    /// The contents move `x0`/`x1` inward for the duration of `body` and the
+    /// cursor starts past the card's own padding, so everything drawn inside —
+    /// a row, a meter, a chart — is inset without knowing a card exists. Both
+    /// are restored afterwards, because the next card is full width again.
+    ///
+    /// `height` is the card's **outer** height, and the body has to draw exactly
+    /// that much minus the padding. `card_h` computes it from the contents so
+    /// the painter never adds those numbers up by hand.
+    ///
+    /// The cursor lands on the card's bottom edge plus the lane gap, whatever
+    /// the body left behind: a body that drew short would otherwise pull the
+    /// next card up into this one's plate.
+    pub(crate) fn card<F>(&mut self, dpi: u32, height: i32, body: F)
+    where
+        F: FnOnce(&mut Self),
+    {
+        let top = self.y;
+        // SAFETY: a live DC; `rounded_fill` documents its own contract.
+        unsafe {
+            rounded_fill(
+                self.dc,
+                RECT {
+                    left: self.x0,
+                    top,
+                    right: self.x1,
+                    bottom: top + height,
+                },
+                scale(CARD_RADIUS, dpi),
+                self.pal.card,
+            );
+        }
+        let (outer_x0, outer_x1) = (self.x0, self.x1);
+        let pad = scale(CARD_PAD, dpi);
+        self.x0 += pad;
+        self.x1 -= pad;
+        self.y = top + pad;
+        body(self);
+        self.x0 = outer_x0;
+        self.x1 = outer_x1;
+        self.y = top + height + scale(LANE_GAP, dpi);
+    }
+
+    /// A card's head: a tinted chip, its title, and a muted note at the right.
+    ///
+    /// The chip is the rounded-square kind, which is what tells a card's heading
+    /// apart from a stat tile's circular one in the same window.
+    pub(crate) fn card_head(&mut self, dpi: u32, cp: u16, tint: COLORREF, title: &str, right: &str) {
+        let size = scale(CHIP, dpi);
+        let top = self.y;
+        let text_top = top + (size - self.row_h) / 2 + self.nudge;
+        // SAFETY: a live DC and faces owned by the caller's frame; `chip` and
+        // `draw` each document their own contract.
+        unsafe {
+            chip(
+                self.dc,
+                self.fonts.icon,
+                cp,
+                RECT {
+                    left: self.x0,
+                    top,
+                    right: self.x0 + size,
+                    bottom: top + size,
+                },
+                tint,
+                self.pal.card,
+                false,
+                dpi,
+            );
+            SetTextColor(self.dc, self.text_colour());
+            draw(
+                self.dc,
+                self.fonts.bold,
+                title,
+                self.x0 + size + scale(S2, dpi),
+                text_top,
+                self.x1,
+                DT_LEFT,
+            );
+            SetTextColor(self.dc, self.pal.muted);
+            draw(
+                self.dc,
+                self.fonts.caption,
+                right,
+                self.x0,
+                text_top,
+                self.x1,
+                DT_RIGHT | DT_END_ELLIPSIS,
+            );
+        }
+        self.y = top + head_h(dpi);
+    }
+
+    /// Three readings side by side, each an icon chip with a value and a caption.
+    ///
+    /// A lane rather than three calls because the three have to be the same
+    /// width: tiles sized to their own text would make a row of three ragged
+    /// columns, and the eye reads a row of readings as a row only when they line
+    /// up. The tint travels with each tile — three identical chips is a list of
+    /// bullets, not three readings.
+    ///
+    /// Items are `(tint, glyph, value, caption)`.
+    pub(crate) fn stat_lane(&mut self, dpi: u32, items: [(COLORREF, u16, &str, &str); 3]) {
+        let gap = scale(LANE_GAP, dpi) / 2;
+        let tile_h = scale(TILE_H, dpi);
+        let chip_size = scale(CHIP, dpi);
+        let top = self.y;
+        let span = (self.x1 - self.x0 - gap * 2) / 3;
+        // Two lines in a tile shorter than two rows, so the step is two thirds
+        // of a band and the pair is centred against the chip.
+        let step = self.row_h * 2 / 3;
+        let text_top = top + (tile_h - step * 2) / 2;
+        let chip_top = top + (tile_h - chip_size) / 2;
+        for (index, (tint, cp, value, caption)) in items.into_iter().enumerate() {
+            let left = self.x0 + (span + gap) * index as i32;
+            // The last tile is pinned to the right edge rather than to
+            // `left + span`: the integer division above leaves a few pixels over
+            // and a lane that stops short of its own card looks like a mistake.
+            let right = if index == 2 { self.x1 } else { left + span };
+            let text_x = left + chip_size + scale(S2, dpi);
+            // SAFETY: a live DC and faces owned by the caller's frame; `chip`
+            // and `draw` each document their own contract.
+            unsafe {
+                chip(
+                    self.dc,
+                    self.fonts.icon,
+                    cp,
+                    RECT {
+                        left,
+                        top: chip_top,
+                        right: left + chip_size,
+                        bottom: chip_top + chip_size,
+                    },
+                    tint,
+                    self.pal.card,
+                    true,
+                    dpi,
+                );
+                SetTextColor(self.dc, self.text_colour());
+                draw(
+                    self.dc,
+                    self.fonts.bold,
+                    value,
+                    text_x,
+                    text_top,
+                    right,
+                    DT_LEFT | DT_END_ELLIPSIS,
+                );
+                SetTextColor(self.dc, self.pal.muted);
+                draw(
+                    self.dc,
+                    self.fonts.caption,
+                    caption,
+                    text_x,
+                    text_top + step,
+                    right,
+                    DT_LEFT | DT_END_ELLIPSIS,
+                );
+            }
+        }
+        self.y = top + lane_h(dpi);
+    }
+
+    /// A reading as a proportion: its caption and value on a band, and a track
+    /// under them filled to `pct` of the width.
+    ///
+    /// `pct` is a fraction, 0 to 1. The track runs the whole content width
+    /// rather than a fixed share of it, so two meters in one card are read
+    /// against the same scale — a bar that stopped two thirds of the way across
+    /// would say "two thirds" twice.
+    pub(crate) fn meter(&mut self, dpi: u32, label: &str, value: &str, pct: f32, tint: COLORREF) {
+        let top = self.y;
+        // SAFETY: a live DC and faces owned by the caller's frame.
+        unsafe {
+            SetTextColor(self.dc, self.text_colour());
+            draw(
+                self.dc,
+                self.fonts.body,
+                label,
+                self.x0,
+                top + self.nudge,
+                self.x1,
+                DT_LEFT,
+            );
+            draw(
+                self.dc,
+                self.fonts.bold,
+                value,
+                self.x0,
+                top + self.nudge,
+                self.x1,
+                DT_RIGHT | DT_END_ELLIPSIS,
+            );
+        }
+        let track_h = scale(TRACK_H, dpi);
+        let track = RECT {
+            left: self.x0,
+            top: top + self.row_h,
+            right: self.x1,
+            bottom: top + self.row_h + track_h,
+        };
+        let filled = ((track.right - track.left) as f32 * pct.clamp(0.0, 1.0)) as i32;
+        // SAFETY: a live DC; `rounded_fill` documents its own contract.
+        unsafe {
+            // A capsule, so the bar's ends match the chip it sits under.
+            rounded_fill(self.dc, track, track_h / 2, self.pal.border);
+            if filled > 0 {
+                rounded_fill(
+                    self.dc,
+                    RECT {
+                        right: track.left + filled,
+                        ..track
+                    },
+                    track_h / 2,
+                    tint,
+                );
+            }
+        }
+        self.y = top + meter_h(self.row_h, dpi);
+    }
 }
 
 #[cfg(test)]
@@ -611,4 +1038,78 @@ mod tests {
         assert_eq!(c.y() - before_empty, 30 + 24);
     }
 
+    /// The cards, and the one property that makes them safe to lay out: a card
+    /// claims exactly the height it was given plus the lane gap, and restores
+    /// the content column, whatever its body did.
+    ///
+    /// The height is the bug this guards against. A card's body and its height
+    /// are computed in two places — the painter's sum and the drawing calls —
+    /// and when they disagree the contents run out through the plate's bottom
+    /// edge, which no test of the cursor alone would catch. Driving a real body
+    /// that draws the same sum is what makes them one expression.
+    #[test]
+    fn a_card_claims_its_height_restores_the_column_and_insets_its_body() {
+        let fonts = Fonts {
+            body: HFONT::default(),
+            bold: HFONT::default(),
+            title: HFONT::default(),
+            caption: HFONT::default(),
+            clock: HFONT::default(),
+            icon: HFONT::default(),
+        };
+        let pal = crate::ui::design::palette(&crate::config::Config::default());
+        // 96 DPI, where every scaled constant is the constant.
+        const DPI: u32 = 96;
+        let mut c = Canvas::new(HDC::default(), &fonts, &pal, 0, 200, 30, 6, 100);
+
+        let start = c.y();
+        let mut inner_seen = (0, 0);
+        let mut body_top = 0;
+        let outer = card_h(DPI, head_h(DPI) + 2 * meter_h(30, DPI));
+        c.card(DPI, outer, |c| {
+            inner_seen = (c.x0, c.x1);
+            body_top = c.y();
+            c.card_head(DPI, 0xE9FA, pal.tile_blue, "Traffic", "Live");
+            c.meter(DPI, "CPU", "10%", 0.1, pal.tile_blue);
+            c.meter(DPI, "RAM", "40%", 0.4, pal.tile_green);
+        });
+        assert_eq!(
+            c.y() - start,
+            outer + LANE_GAP,
+            "a card claims its own height plus the lane gap"
+        );
+        assert_eq!(
+            (c.x0, c.x1),
+            (0, 200),
+            "the content column comes back out with the card"
+        );
+        assert_eq!(
+            inner_seen,
+            (CARD_PAD, 200 - CARD_PAD),
+            "the body draws inside the padding"
+        );
+        assert_eq!(
+            body_top,
+            start + CARD_PAD,
+            "and starts past the card's own top padding"
+        );
+
+        // The sub-components: a head is a chip and a gap, a lane is a tile and a
+        // gap, a meter is a row plus its track and a gap. Pinned because the
+        // painter sums these to size a card, so a change here silently changes
+        // every card's height.
+        assert_eq!(head_h(DPI), CHIP + S2);
+        assert_eq!(lane_h(DPI), TILE_H + S2);
+        assert_eq!(meter_h(30, DPI), 30 + TRACK_H + S2);
+
+        // The pill rides a band without claiming one, which is the only reason
+        // the date can sit on the title's own line.
+        let before_pill = c.y();
+        c.date_pill(DPI, "18 Sep 2026");
+        assert_eq!(c.y(), before_pill, "the date pill must not claim a band");
+
+        let before_sub = c.y();
+        c.subtitle("Live traffic and load at a glance");
+        assert_eq!(c.y() - before_sub, 30);
+    }
 }

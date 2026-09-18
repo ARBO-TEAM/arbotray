@@ -45,6 +45,38 @@ pub(crate) const ITEM_H: i32 = 34;
 /// rounded rectangle and not as a capsule.
 pub(crate) const RADIUS: i32 = 8;
 
+/// A card's corner. Softer than `RADIUS`: a card is a large rectangle and the
+/// same corner on a big shape reads as barely rounded at all.
+pub(crate) const CARD_RADIUS: i32 = 12;
+
+/// Air between a card's edge and its contents.
+pub(crate) const CARD_PAD: i32 = 16;
+
+/// The icon chip a card or a tile leads with: a tinted rounded square or
+/// circle with one glyph in it.
+pub(crate) const CHIP: i32 = 28;
+
+/// The channel between the two content columns.
+pub(crate) const LANE_GAP: i32 = 16;
+
+/// A meter track's height. Thick enough to read a proportion off, thin enough
+/// that it stays a bar and not a block.
+pub(crate) const TRACK_H: i32 = 7;
+
+/// A stat tile's height: an icon chip with two lines beside it.
+///
+/// Sized to the text rather than to the chip, because the chip is centred
+/// against the two lines and a band cut to the chip would clip the value's
+/// descenders.
+pub(crate) const TILE_H: i32 = 42;
+
+/// The colour a chip's plate is: its tint mixed this far into the surface.
+///
+/// Low on purpose. The glyph carries the colour and the plate is only there to
+/// lift it off the card, so a plate anywhere near the tint's own saturation
+/// would be a second, louder mark beside the one it is decorating.
+pub(crate) const CHIP_TINT_PCT: u32 = 15;
+
 /// The column a sidebar entry spends on its glyph, before its label starts.
 pub(crate) const ICON_COL: i32 = 28;
 
@@ -83,6 +115,16 @@ pub(crate) struct Palette {
     pub accent_text: COLORREF,
     /// Over-quota text and the failure notice.
     pub danger: COLORREF,
+    /// A card's plate. A step off the surface, like the sidebar — a card has to
+    /// read as a raised panel rather than as a rectangle drawn on the page.
+    pub card: COLORREF,
+    /// The Download / upload / latency tints. Four because a stat row is read
+    /// left to right and three identical chips is not a row of readings, it is
+    /// a row of bullets.
+    pub tile_blue: COLORREF,
+    pub tile_violet: COLORREF,
+    pub tile_green: COLORREF,
+    pub tile_amber: COLORREF,
 }
 
 /// Perceived luminance of a `COLORREF`, 0-255.
@@ -123,11 +165,34 @@ const ACCENT_DARK: COLORREF = COLORREF(0x00FF_840A);
 /// And the light-appearance value.
 const ACCENT_LIGHT: COLORREF = COLORREF(0x00FF_7A00);
 
+/// The stat-row tints, per appearance, in `COLORREF`'s blue-first order.
+///
+/// Two sets rather than one: a colour bright enough to read as a mark on black
+/// is washed out on white and vice versa, which is the same reason the accent
+/// above is a pair. Names are the hue, not the reading — the download tile is
+/// blue because it is first, not because blue means download.
+const TINT_DARK: [COLORREF; 4] = [
+    COLORREF(0x00FF_840A), // blue
+    COLORREF(0x00F2_5ABF), // violet
+    COLORREF(0x00_58_D1_30), // green
+    COLORREF(0x00_0A_9F_FF), // amber
+];
+const TINT_LIGHT: [COLORREF; 4] = [
+    COLORREF(0x00FF_7A00), // blue
+    COLORREF(0x00DE_52AF), // violet
+    COLORREF(0x00_59_C7_34), // green
+    COLORREF(0x00_00_95_FF), // amber
+];
+
+/// How far a card is lifted off (or dropped below) the page.
+const CARD_STEP: u32 = 14;
+
 /// Resolve the whole palette from the config's theme.
 pub(crate) fn palette(cfg: &Config) -> Palette {
     let surface = crate::ui::theme::background(cfg);
     let text = crate::ui::theme::foreground(cfg);
     let dark = is_dark(cfg);
+    let tints = if dark { TINT_DARK } else { TINT_LIGHT };
 
     Palette {
         surface,
@@ -142,6 +207,11 @@ pub(crate) fn palette(cfg: &Config) -> Palette {
         accent: if dark { ACCENT_DARK } else { ACCENT_LIGHT },
         accent_text: WHITE,
         danger: parse_color(&cfg.theme.alert).unwrap_or(COLORREF(0x0000_00FF)),
+        card: crate::ui::theme::shade(surface, CARD_STEP),
+        tile_blue: tints[0],
+        tile_violet: tints[1],
+        tile_green: tints[2],
+        tile_amber: tints[3],
     }
 }
 
@@ -179,6 +249,36 @@ pub(crate) const ICON_TIMER: u16 = 0xE823;
 pub(crate) const ICON_MOON: u16 = 0xE708;
 /// The light-mode glyph, the other half of the pair above.
 pub(crate) const ICON_SUN: u16 = 0xE706;
+
+// --- card and tile glyphs -------------------------------------------------
+//
+// A different set from the sidebar's above, and deliberately not shared with
+// it: a card's chip sits two inches from a sidebar entry on the same screen, so
+// the two picture sets have to stay tellable apart. Every one below was read
+// off a rendered contact sheet, not taken from a list of names.
+
+/// Three nodes joined by lines — the traffic group's chip.
+pub(crate) const ICON_TRAFFIC: u16 = 0xE9FA;
+/// A die with pins: the usage group's chip.
+pub(crate) const ICON_USAGE: u16 = 0xE964;
+/// A display on a stand, for the system card.
+pub(crate) const ICON_DESKTOP: u16 = 0xEC4E;
+/// An area chart, for the live readings.
+pub(crate) const ICON_LIVE: u16 = 0xE9D2;
+/// A memory module, for the hardware group.
+pub(crate) const ICON_MEMORY: u16 = 0xE950;
+/// A laptop, for the machine itself.
+pub(crate) const ICON_MACHINE: u16 = 0xE7F8;
+/// A disc, for the volumes.
+pub(crate) const ICON_STORAGE: u16 = 0xE958;
+/// An arrow into a tray, and the same arrow out — the two directions a byte can
+/// travel, which is the only thing the two tiles differ by.
+pub(crate) const ICON_DOWN: u16 = 0xE896;
+pub(crate) const ICON_UP: u16 = 0xEC49;
+/// A dial. Latency is a duration, so its tile leads with a clock face.
+pub(crate) const ICON_LATENCY: u16 = 0xE823;
+/// A calendar page, for the date beside the clock.
+pub(crate) const ICON_CALENDAR: u16 = 0xE787;
 
 /// The glyph a sidebar entry leads with, by page index.
 /// The glyph for the appearance button: the mode it leads to.
@@ -378,6 +478,11 @@ mod tests {
             accent: ACCENT_DARK,
             accent_text: WHITE,
             danger: BLACK,
+            card: BLACK,
+            tile_blue: BLACK,
+            tile_violet: BLACK,
+            tile_green: BLACK,
+            tile_amber: BLACK,
         };
         assert!(
             luma(dark.muted) < luma(dark.text),
@@ -486,4 +591,5 @@ mod tests {
         }
     }
 }
+
 
