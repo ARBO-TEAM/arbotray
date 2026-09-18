@@ -1,12 +1,12 @@
 # ArboTray Feature Status
 
-Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.10.0** (`Cargo.toml:3`) — refreshed 2026-09-18. The previous revision covered v0.9.0.
+Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.11.0** (`Cargo.toml:3`) — refreshed 2026-09-18. The previous revision covered v0.10.0.
 
 All features are available to every user — there is no free tier, no premium tier, and no licence gate.
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
 
-Tree today: 18,653 lines of Rust across `src/`, **243 tests passing, 2 ignored**.
+Tree today: 18,653 lines of Rust across `src/`, **264 tests passing, 2 ignored**.
 
 ## Summary
 
@@ -14,12 +14,12 @@ Tree today: 18,653 lines of Rust across `src/`, **243 tests passing, 2 ignored**
 | --- | --- | --- |
 | Live Speed Widget | Done | `src/taskbar/mod.rs:48-55` formats into `down_text`/`up_text`; painted at `src/taskbar/render.rs:240-253` |
 | Always-on-Top Widget | Done | `src/widget/window.rs:231` `HWND_TOPMOST`; draggable by `HTCAPTION` (`:30`), 4 modules under `src/widget/` |
-| System Tray Icon | Partial | Icon, tooltip and menu complete (`src/taskbar/icon.rs:72-163`), but still no `NIF_INFO` — zero matches tree-wide |
+| System Tray Icon | Done | Icon, tooltip, menu and `NIF_INFO` balloons (`src/taskbar/icon.rs`, `src/taskbar/alert.rs`) |
 | Settings (UI) | Done | Page 8 of the sidebar, two cards: "Display Tiles" (the 8 tile checkboxes, 2×4) and "Preferences" (11 rows, ending in the Save/Reload pair) |
 | Adapter Config | Not done | `GetAdaptersAddresses` reads the routed interface (`src/telemetry/adapter.rs:95`) but only to display it; no `config.adapter` field exists |
 | Dark & Light Theme | Done | Appearance row swaps both colour fields between presets (`src/ui/design.rs` `next_preset`); staged behind Save |
 | Dashboard | Done | 9-page sidebar (`src/ui/pages.rs:12`), charts with axes (`src/ui/chart.rs`), reusable modal, DPI-scaled |
-| Data Plan | Partial | `quota_gb` is now editable on the Settings page (`ROW_PLAN`, `src/ui/settings.rs:542`); the percentage is still never printed |
+| Data Plan | Done | `quota_gb` editable on the Settings page; the Data page prints the share (`41% of 250 GB`), measured against the month |
 | WiFi | Partial | SSID, band, signal read (`src/telemetry/wifi.rs:101-111`); no scan, no profile management, no history |
 | Network Tools | Not done | Zero matches for `DnsQuery`/`getaddrinfo`/TTL — the only ICMP is the fixed gateway probe |
 | Speed Test | Done | `src/telemetry/speedtest.rs` — on-demand throughput over WinHttp, no new crate |
@@ -35,23 +35,20 @@ Tree today: 18,653 lines of Rust across `src/`, **243 tests passing, 2 ignored**
 | Start with Windows | Done | `ROW_STARTUP` toggle writing the `Run` key |
 | Tray Notifications | Done | `Notify` config, `alert::Alerts` engine (quota threshold + rate rising-edge), `Icon::balloon` via `NIF_INFO`, Settings rows in Preferences card |
 
-Counts: **15 Done, 3 Partial, 4 Not done** — 22 rows, counted from the table above, which is the authority.
+Counts: **17 Done, 1 Partial, 4 Not done** — 22 rows, counted from the table above, which is the authority.
 
 The nine pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8). The `OVERVIEW`/`NETWORK`/…/`SETTINGS` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke.
 
 ## Done
 
 ### Live Speed Widget
-The product's core and unchanged since v0.2.0. `Sampler::poll` reads cumulative octet counters over every up, non-loopback, hardware interface and divides the delta by elapsed time (`src/telemetry/network.rs`); `TrayModel::from_metric` formats both directions (`src/taskbar/mod.rs:48-55`); the renderer draws them into the taskbar next to the clock, with a 60-sample download sparkline. Counter resets are handled as lost deltas rather than spikes.
+The product's core and unchanged since v0.2.0. `Sampler::poll` reads cumulative octet counters over every up hardware interface and divides the delta by elapsed time (`src/telemetry/network.rs`); `TrayModel::from_metric` formats both directions (`src/taskbar/mod.rs:48-55`); the renderer draws them into the taskbar next to the clock, with a 60-sample download sparkline. Counter resets are handled as lost deltas rather than spikes.
 
 ### Always-on-Top Widget
 The IMPROVE.md item the v0.2.0 audit recorded as a deliberate divergence, now built as its own top-level window rather than a flag on the taskbar strip. `src/widget/` holds four modules — `window.rs` (creation, drag, topmost, its own paint loop), `render.rs`, `rows.rs`, `metrics.rs` — with tests in three of them. It is `HWND_TOPMOST` (`window.rs:231`), moves by `WM_NCHITTEST` returning `HTCAPTION` (`:30`), and shows traffic plus CPU and RAM rather than the full taskbar string, because at panel size the rest was unreadable.
 
-### System Tray Icon — still no notifications
-Icon, tooltip and the right-click menu are complete, including the drop-time `NIM_DELETE` that prevents ghost icons and the truncating copy that cannot overrun `szTip` (`src/taskbar/icon.rs:86-163`). The missing half is unchanged: no `NIF_INFO`, no balloon, no toast. The icon reflects live speed in its hover text but never pushes an alert.
-
-- Next step: on the existing `WM_TRAY_UPDATE` path, when `quota_alert` flips false→true, call `Shell_NotifyIconW(NIM_MODIFY)` with `uFlags |= NIF_INFO`. Reuse `WindowState.model` to detect the edge; do not add a timer.
-- Dashboard page: none — tray-level.
+### System Tray Icon
+Icon, tooltip and the right-click menu are complete, including the drop-time `NIM_DELETE` that prevents ghost icons and the truncating copy that cannot overrun `szTip`. Balloons landed in v0.11.0: `Icon::balloon` sends `NIM_MODIFY` with `NIF_INFO`, and `src/taskbar/alert.rs` decides when there is anything worth saying — a plan threshold announced once per crossing, and a rate alert on the rising edge with a five-minute cooldown. The restraint is the feature: a sampler at 1 Hz with no edge detection would fire sixty balloons a minute, and the second one is already worse than none.
 
 ### Settings page
 Page 8, and now two rounded cards rather than a flat list of rows. Card 1, "Display Tiles", holds the eight tile checkboxes in two columns by four rows; card 2, "Preferences", holds eleven rows — Refresh, Monthly plan, Font size, Background, Foreground, Alert, Opacity, Start with Windows, Desktop widget, Appearance, and the Save/Reload pair under the caption `Write config.json`. The divider that used to separate the two halves is gone; the card edge does that job now.
@@ -96,18 +93,9 @@ Nothing fires without being asked. A minute before the instant the popup comes u
 A timer whose moment passed while the machine was asleep is dropped with a note rather than fired at — that is what the engine's five-minute grace window is for.
 
 ### Update check
-`src/update.rs`: a background check that never blocks a paint, the version printed as a `Version` row on the System page's "This machine" card (`update::current()`, i.e. `CARGO_PKG_VERSION`, now `0.10.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
+`src/update.rs`: a background check that never blocks a paint, the version printed as a `Version` row on the System page's "This machine" card (`update::current()`, i.e. `CARGO_PKG_VERSION`, now `0.11.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
 
 ## Partial
-
-### System Tray Icon — no notifications
-See Done above for what ships. This is the only remaining gap against the original IMPROVE.md wording, and it is worth one small change rather than a subsystem.
-
-### Data Plan — the percentage is never shown
-`quota_gb` became editable when the Settings page gained its field, which closes half of what the v0.2.0 audit recorded. The other half stands: `quota_pct` is computed (`src/telemetry/usage.rs:251`) and used solely as a boolean — over plan or not — so the user sees a recoloured window but never "42% of plan" anywhere. `clamp_quota_gb` (`src/config/mod.rs:285`) will reject a nonsense entry.
-
-- Next step: add a "Plan" row to the Data page printing the percentage. `quota_pct` already exists and the collector already runs.
-- Dashboard page: Data.
 
 ### WiFi — read-only, one snapshot
 Band, SSID and signal all work. Missing against "kekuatan sinyal, hingga pengelolaan kata sandi yang tersimpan": no signal history or trend, no `WlanGetProfile`/`WlanSetProfile`, and no `WlanGetAvailableNetworkList` scan — zero matches tree-wide, since the collector only ever queries the interface already connected. On a desktop with no WLAN card `poll()` returns `None` and the feature disappears, which is correct behaviour but means there is nothing to fall back to.
@@ -124,13 +112,13 @@ Band, SSID and signal all work. Missing against "kekuatan sinyal, hingga pengelo
 ## Not done
 
 ### Adapter Config
-`GetAdaptersAddresses` is available and used (`src/telemetry/adapter.rs:95`, `:200`) but only to *report* the routed interface on the Network page. Throughput is still the sum of every up, non-loopback, hardware interface (`src/telemetry/network.rs:44-50`, `:71-103`), and there is no `config.adapter` field to select one.
+`GetAdaptersAddresses` is available and used (`src/telemetry/adapter.rs:95`, `:200`) but only to *report* the routed interface on the Network page. Throughput is still the sum of every up hardware interface (`src/telemetry/network.rs:44-50`, `:71-103`), and there is no `config.adapter` field to select one.
 
 - Next step: list adapters on the Network page with per-adapter totals, and add a `config.adapter` selector that filters `read_counters`. `GetAdaptersAddresses` is already enabled in `Cargo.toml` with no dependency change.
 - Dashboard page: Network.
 
 ### Network Interface
-Per-interface statistics are discarded at the source: `GetIfTable2` rows are iterated and summed into one `(rx, tx)` pair, with only `OperStatus`, loopback and the hardware bit used for filtering. No interface name, speed, MTU or error counter survives the loop.
+Per-interface statistics are discarded at the source: `GetIfTable2` rows are iterated and summed into one `(rx, tx)` pair, with only `OperStatus` and the hardware bit used for filtering. No interface name, speed, MTU or error counter survives the loop.
 
 - Next step: return a `Vec<InterfaceRow>` instead of a summed pair (or add a second function beside it). Note `app.rs` and `usage.rs` depend on the summed contract, so keep that shape and add a parallel detail read.
 - Dashboard page: Network, or System if framed as hardware.
@@ -147,16 +135,15 @@ The hardest item, and still the hardest. Per-PID *identification* now exists ins
 - Next step: `GetProcessIoCounters` + the existing PID mapping gives per-PID totals (not per-connection rates, and not network-specific — it counts disk too). True real-time per-app bandwidth needs an ETW kernel session. Scope which approximation is acceptable before starting.
 - Dashboard page: Network.
 
-## Cross-cutting finding (not an IMPROVE.md item)
+## Cross-cutting findings (not IMPROVE.md items)
 
-`src/taskbar/events.rs` handles an Explorer restart by posting `WM_QUIT`, and the comment there is honest about it — there is still **no supervisor**. `app::run` calls `message_loop()` once and returns, so the process simply exits. The real fix is a re-attach loop in `app`, and it is not written. Unchanged from the v0.2.0 audit; not made worse by anything since.
+**Explorer-restart supervisor — fixed in v0.11.0.** The previous audits recorded this as the one outright correctness bug, and the diagnosis in the code was wrong in an instructive way. The `TaskbarCreated` arm in `events.rs` was dead code: that broadcast only reaches *top-level* windows, and the tray strip is a `WS_CHILD` of `Shell_TrayWnd`. What actually happens is that the parent dies and takes the child with it, so the real signal is `WM_DESTROY`. `app::run` now loops around `message_loop()` and rebuilds, distinguishing a user Quit from a restart by an `AtomicBool` the menu sets. The telemetry thread deliberately *survives* the rebuild and is re-pointed at the new window through a `NotifierCell`, because the byte counters are cumulative and a fresh `Sampler` would report the whole month as one spike.
+
+**Quota measured against the wrong window — fixed in v0.11.0.** `quota_pct` divided `total_bytes()` (today) by `quota_gb` (a *monthly* allowance), so every reading was roughly thirty times too low. On the author machine a plan that was 65% spent displayed as 35%, the over-plan colour could not fire until one single day exceeded the whole month, and the new 90% balloon threshold was effectively unreachable. It now divides `month_bytes()`. The old tests missed it because every fixture held one day, where the two totals are identical.
 
 ## Suggested next
 
 Ordered by effort-to-value:
 
-1. **Explorer-restart supervisor** — the one outright correctness bug left. Re-attach instead of exiting; the comment already says so.
-2. **Notifier balloons** — `NIF_INFO` on the tray icon for quota alerts. The icon is installed and its tooltip already updates; this is the smallest remaining item.
-3. **Data Plan percentage** — one row on the Data page over a `quota_pct` that already exists.
-4. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed contract that `app` and `usage` depend on; unlocks Adapter Config after it.
-5. **Opacity caption** — the value is real on the panel and a switch on the strip; the row could say which.
+1. **Per-interface stats** — return a `Vec<InterfaceRow>` alongside the summed contract that `app` and `usage` depend on; unlocks Adapter Config after it.
+2. **Opacity caption** — the value is real on the panel and a switch on the strip; the row could say which.

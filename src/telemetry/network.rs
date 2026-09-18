@@ -41,6 +41,11 @@ struct Row {
 /// reason they are unnecessary: bytes crossing one of those cross the physical
 /// NIC too, so counting the filter rows as well would be double counting by a
 /// narrower margin. What a data plan is burned by is what the hardware carried.
+///
+/// There is deliberately no loopback test. `Loopback Pseudo-Interface` is not a
+/// hardware interface, so the bit above already excludes it — verified against
+/// a live table, where it reports `type=24, up=1, hw=0`. A separate check on
+/// `IF_TYPE_SOFTWARE_LOOPBACK` would be dead code that reads like a safeguard.
 fn counts(row: &Row) -> bool {
     row.up && row.hardware
 }

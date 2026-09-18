@@ -120,17 +120,32 @@ pub(crate) fn socket_rows(model: &TrayModel) -> Vec<(&'static str, String)> {
 /// it: the window already turns red top to bottom when the quota is blown (see
 /// `Canvas::emphasise`), and a second red mark inside a red page says nothing
 /// the first one did not.
+///
+/// The percentage is the reason this row exists. `250 GB` on its own is the
+/// number the user typed into the Settings page — reading it back tells them
+/// nothing they did not already know. `41% of 250 GB` is the answer to the
+/// question they opened the page with.
 pub(crate) fn plan_row(cfg: &Config, model: &TrayModel) -> Option<(&'static str, String)> {
     if cfg.quota_gb <= 0.0 {
         return None;
     }
     let gb = cfg.quota_gb;
+    // `quota_pct` is `None` only when there is no plan, which the guard above
+    // has already ruled out — but it is carried as an `Option` for exactly that
+    // case, so falling back to the bare figure is the honest reading rather
+    // than printing a `0%` nobody measured.
+    let Some(pct) = model.quota_pct else {
+        return Some(("Plan", format!("{gb} GB")));
+    };
     Some((
         "Plan",
         if model.quota_alert {
-            format!("{gb} GB \u{2014} over plan")
+            // Over plan: the percentage is past 100 and saying so plainly is
+            // more use than the word alone — 103% and 260% are different
+            // situations and the row is the only place that difference shows.
+            format!("{pct:.0}% of {gb} GB \u{2014} over plan")
         } else {
-            format!("{gb} GB")
+            format!("{pct:.0}% of {gb} GB")
         },
     ))
 }
@@ -252,6 +267,9 @@ mod tests {
             speed_up_text: "11.8M/s".into(),
             speed_latency_text: "14ms".into(),
             speed_phase_text: "Done".into(),
+            // A plan 42% spent, so the row's percentage has something real to
+            // print rather than falling back to the bare figure.
+            quota_pct: Some(42.0),
             ..Default::default()
         }
     }
@@ -327,7 +345,9 @@ mod tests {
         };
         let rows = usage_totals(&planned, &full());
         assert_eq!(rows.last().unwrap().0, "Plan", "the plan closes the card");
-        assert_eq!(rows.last().unwrap().1, "250 GB");
+        // The share is the point of the row: the bare `250 GB` is the number
+        // the user typed in themselves, and reading it back tells them nothing.
+        assert_eq!(rows.last().unwrap().1, "42% of 250 GB");
 
         // And the overage is said in the value rather than by colour: the whole
         // window already goes red when the quota is blown.

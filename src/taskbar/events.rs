@@ -11,6 +11,7 @@ use crate::taskbar::render::Renderer;
 use crate::taskbar::{TrayModel, dock};
 use crate::telemetry::SpeedTest;
 use crate::ui;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -30,8 +31,17 @@ pub struct WindowState {
     pub model: TrayModel,
     pub renderer: Renderer,
     pub cfg: Config,
-    /// `RegisterWindowMessageW("TaskbarCreated")` — sent when Explorer restarts.
-    pub taskbar_created: u32,
+    /// Set when the user picks Quit, and only then.
+    ///
+    /// Both ways out of this window end in `PostQuitMessage`, so the message
+    /// loop returning cannot on its own say which happened — and the two need
+    /// opposite responses: a Quit should end the process, an Explorer restart
+    /// should rebuild. This flag is the difference, read by the supervisor in
+    /// `app::run` once the loop has returned.
+    ///
+    /// Shared with `app` rather than returned, because the loop returns the
+    /// same `()` either way and the window is gone by the time it does.
+    pub quit: Arc<AtomicBool>,
     /// `None` only between window creation and icon install.
     pub icon: Option<Icon>,
     /// Our own module, for the icon resource and the dashboard's window class.
@@ -92,20 +102,16 @@ pub unsafe extern "system" fn wnd_proc(
         }
         let state = &mut *state;
 
-        if msg == state.taskbar_created {
-            // Explorer restarted and our parent taskbar is gone. The child
-            // window cannot outlive its parent, and we cannot rebuild
-            // ourselves from inside our own doomed message loop, so the loop
-            // is ended here and `app` returns.
-            //
-            // That means an Explorer restart ends the process: there is no
-            // supervisor that re-attaches to the new taskbar yet, so the tray
-            // display stays gone until the app is started again. Re-attaching
-            // is the fix, and it belongs in `app`, not here.
-            PostQuitMessage(0);
-            return LRESULT(0);
-        }
-
+        // There is deliberately no `TaskbarCreated` arm here. That message is
+        // a broadcast, and a broadcast only reaches *top-level* windows — this
+        // one is `WS_CHILD` of `Shell_TrayWnd`, so it would never arrive. An
+        // earlier revision had one and it was dead code.
+        //
+        // What actually happens when Explorer restarts is simpler: the parent
+        // taskbar is destroyed, a child cannot outlive its parent, so this
+        // window gets `WM_DESTROY` and the loop ends by the ordinary path. The
+        // supervisor in `app::run` tells that apart from a user Quit by the
+        // `quit` flag and re-attaches.
         match msg {
             WM_TRAY_UPDATE => {
                 // Drain everything queued and keep only the newest sample —
@@ -290,6 +296,11 @@ fn menu(state: &mut WindowState, hwnd: HWND) {
     match show_menu(hwnd) {
         Some(CMD_OPEN) => open_dashboard(state),
         Some(CMD_QUIT) => {
+            // Set *before* the window goes, because destroying it is what ends
+            // the loop the supervisor is waiting on — written after, the race
+            // would be with `app::run` deciding whether to rebuild, and losing
+            // it would relaunch the tray the user just closed.
+            state.quit.store(true, Ordering::SeqCst);
             // Destroying tears down the icon in `WindowState::drop` and posts
             // the `WM_QUIT` that ends the message loop.
             ui::close(state.ui);

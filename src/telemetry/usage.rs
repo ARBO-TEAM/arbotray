@@ -248,11 +248,22 @@ impl Usage {
     /// Share of `quota_gb` consumed, 0..=∞. Deliberately *not* clamped at 100:
     /// the whole point of a quota readout is showing that you went over.
     /// `None` when no usable quota is configured.
+    ///
+    /// Measured against [`Usage::month_bytes`], because `quota_gb` is a
+    /// *monthly* allowance. An earlier revision divided today's total by the
+    /// monthly figure, which read about thirty times too low — a plan that was
+    /// actually spent showed as 3%, and the over-plan colour could not fire at
+    /// all until a single day exceeded the whole month's allowance.
+    ///
+    /// When the retention window is shorter than the month this is a sum of
+    /// the days still on file rather than a true month-to-date, which reads
+    /// *low*. [`Usage::covers_whole_month`] is what says so, and the Data
+    /// page's month caption carries the caveat.
     pub fn quota_pct(&self, quota_gb: f64) -> Option<f32> {
         if quota_gb <= 0.0 {
             return None;
         }
-        Some((self.total_bytes() as f64 / (quota_gb * GIB) * 100.0) as f32)
+        Some((self.month_bytes() as f64 / (quota_gb * GIB) * 100.0) as f32)
     }
 }
 
@@ -432,6 +443,50 @@ mod tests {
         // The window starts last month, so this is a partial sum — the page has
         // to say so rather than reporting it as month-to-date.
         assert!(!straddling.covers_whole_month());
+    }
+
+    #[test]
+    fn the_quota_is_measured_against_the_month_not_today() {
+        // `quota_gb` is a *monthly* allowance, so a month's worth of days has
+        // to count towards it. Dividing today's total by the monthly figure —
+        // which an earlier revision did — reads about thirty times too low: a
+        // plan that is actually spent shows as 3%, no threshold ever fires, and
+        // the over-plan colour cannot appear until one single day exceeds the
+        // whole month's allowance.
+        //
+        // Every day here is inside one month, so `month_bytes` is their sum and
+        // `total_bytes` is only the last one — which is exactly the difference
+        // the old code could not see.
+        let mut u = with_days(
+            &["2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16"],
+            30,
+        );
+        // 1 GiB per day across five days; today is one of them.
+        for day in &mut u.stored.days {
+            day.rx = 1024 * 1024 * 1024;
+            day.tx = 0;
+        }
+        assert_eq!(u.total_bytes(), 1024 * 1024 * 1024, "today is one day");
+        assert_eq!(u.month_bytes(), 5 * 1024 * 1024 * 1024, "the month is five");
+
+        // Five days against a 10 GB plan is half of it. Against today alone it
+        // would read 10%, and that is the bug.
+        let pct = u.quota_pct(10.0).expect("a plan is configured");
+        assert!((pct - 50.0).abs() < 0.01, "expected 50%, got {pct}");
+    }
+
+    #[test]
+    fn last_months_traffic_does_not_burn_this_months_plan() {
+        // The plan resets with the month, so August's days must not count
+        // against September's allowance even while they are still on file.
+        let mut u = with_days(&["2026-08-30", "2026-08-31", "2026-09-01"], 30);
+        for day in &mut u.stored.days {
+            day.rx = 1024 * 1024 * 1024;
+            day.tx = 0;
+        }
+        // Only the September day counts: 1 GiB of a 10 GB plan.
+        let pct = u.quota_pct(10.0).expect("a plan is configured");
+        assert!((pct - 10.0).abs() < 0.01, "expected 10%, got {pct}");
     }
 
     #[test]

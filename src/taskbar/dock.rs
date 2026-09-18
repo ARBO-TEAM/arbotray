@@ -11,6 +11,7 @@ use crate::taskbar::events::{WM_TRAY_UPDATE, WindowState, wnd_proc};
 use crate::taskbar::icon::Icon;
 use crate::taskbar::render::Renderer;
 use crate::telemetry::SpeedTest;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
@@ -18,7 +19,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GetMessageW,
-    GetWindowRect, MSG, RegisterClassW, RegisterWindowMessageW, TranslateMessage, WM_APP,
+    GetWindowRect, MSG, RegisterClassW, TranslateMessage, WM_APP,
     WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_VISIBLE,
 };
 use windows::core::w;
@@ -40,6 +41,9 @@ pub struct Tray {
     /// Kept boxed so its address is stable for `GWLP_USERDATA`.
     #[allow(dead_code)]
     state: Box<WindowState>,
+    /// Whether the loop ended because the user asked it to. See
+    /// [`Tray::user_quit`].
+    quit: Arc<AtomicBool>,
 }
 
 /// Hand a new config to the telemetry thread, which formats every sample
@@ -72,6 +76,28 @@ pub struct Notifier {
 // another thread, and `Sender` is `Send`. `HWND` is only ever passed to that
 // one API.
 unsafe impl Send for Notifier {}
+
+/// The telemetry thread's handle on the current window, swappable in place.
+///
+/// An Explorer restart destroys the tray window and builds a new one with a
+/// new `HWND` and a new channel — but the telemetry thread must *not* restart
+/// with it. It owns the byte counters, and those are cumulative: a fresh
+/// `Sampler` has no baseline and would report one enormous spike, while a
+/// fresh `Usage` would lose the running day. So the thread outlives the window
+/// and is pointed at the replacement through this.
+pub type NotifierCell = Arc<Mutex<Notifier>>;
+
+/// Point the telemetry thread at a freshly built window.
+///
+/// A poisoned lock is recovered from for the same reason `share_config` does:
+/// the alternative is a live process that has stopped sampling, which is worse
+/// than a lock somebody panicked under.
+pub fn replace_notifier(cell: &NotifierCell, fresh: Notifier) {
+    match cell.lock() {
+        Ok(mut guard) => *guard = fresh,
+        Err(poisoned) => *poisoned.into_inner() = fresh,
+    }
+}
 
 impl Notifier {
     /// The current config, for the telemetry thread to format with.
@@ -123,7 +149,6 @@ impl Tray {
             let module =
                 GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
             let atom = register_class(HINSTANCE(module.0));
-            let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
 
             let dpi = {
                 let d = GetDpiForWindow(taskbar);
@@ -143,13 +168,14 @@ impl Tray {
             // Settings page stop painting within a tick — a copy per side would
             // keep the old visibility until the next launch.
             let shared = Arc::new(Mutex::new(cfg.clone()));
+            let quit = Arc::new(AtomicBool::new(false));
             let (sender, receiver) = channel();
             let mut state = Box::new(WindowState {
                 receiver,
                 model: TrayModel::default(),
                 renderer: Renderer::new(cfg, dpi),
                 cfg: cfg.clone(),
-                taskbar_created,
+                quit: Arc::clone(&quit),
                 icon: None,
                 instance: HINSTANCE(module.0),
                 ui: HWND::default(),
@@ -228,8 +254,17 @@ impl Tray {
                 hwnd,
                 config: Arc::clone(&state.telemetry),
             };
-            Ok((Tray { hwnd, state }, notifier))
+            Ok((Tray { hwnd, state, quit }, notifier))
         }
+    }
+
+    /// Whether the message loop ended because the user picked Quit.
+    ///
+    /// `false` means it ended some other way, and in practice there is only
+    /// one other way: the parent taskbar was destroyed and took this child
+    /// with it. That is the case the supervisor rebuilds from.
+    pub fn user_quit(&self) -> bool {
+        self.quit.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Run the message loop. Blocks until `WM_QUIT`.
