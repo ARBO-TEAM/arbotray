@@ -139,6 +139,11 @@ pub(crate) struct Palette {
     pub tile_violet: COLORREF,
     pub tile_green: COLORREF,
     pub tile_amber: COLORREF,
+    /// The wattage card's tint. A fifth entry rather than a reuse of one of the
+    /// four above: those are spoken for by traffic and load, and a fifth group
+    /// of readings wearing the same chip as the CPU meter reads as the same
+    /// reading drawn twice.
+    pub tile_power: COLORREF,
     /// An owner-drawn control's border, and the ink of a tick. A hairline of
     /// its own rather than `border`'s: the card's rule is mixed toward the
     /// *page*, and a field outline mixed the same way vanishes into the plate
@@ -196,17 +201,19 @@ const ACCENT_LIGHT: COLORREF = COLORREF(0x00FF_7A00);
 /// is washed out on white and vice versa, which is the same reason the accent
 /// above is a pair. Names are the hue, not the reading — the download tile is
 /// blue because it is first, not because blue means download.
-const TINT_DARK: [COLORREF; 4] = [
+const TINT_DARK: [COLORREF; 5] = [
     COLORREF(0x00FF_840A),   // blue
     COLORREF(0x00F2_5ABF),   // violet
     COLORREF(0x00_58_D1_30), // green
     COLORREF(0x00_0A_9F_FF), // amber
+    COLORREF(0x00_3A_45_FF), // red
 ];
-const TINT_LIGHT: [COLORREF; 4] = [
+const TINT_LIGHT: [COLORREF; 5] = [
     COLORREF(0x00FF_7A00),   // blue
     COLORREF(0x00DE_52AF),   // violet
     COLORREF(0x00_59_C7_34), // green
     COLORREF(0x00_00_95_FF), // amber
+    COLORREF(0x00_30_3B_FF), // red
 ];
 
 /// How far a card is lifted off (or dropped below) the page.
@@ -237,6 +244,7 @@ pub(crate) fn palette(cfg: &Config) -> Palette {
         tile_violet: tints[1],
         tile_green: tints[2],
         tile_amber: tints[3],
+        tile_power: tints[4],
         // Toward the *text* rather than the page, so the outline darkens on a
         // light theme and lightens on a dark one: a border has to move away
         // from its own plate, and `border` above moves toward the surface.
@@ -343,6 +351,9 @@ pub(crate) const ICON_UP: u16 = 0xEC49;
 pub(crate) const ICON_LATENCY: u16 = 0xE823;
 /// A calendar page, for the date beside the clock.
 pub(crate) const ICON_CALENDAR: u16 = 0xE787;
+/// A lightning bolt — the one glyph that means "power" without meaning
+/// "settings", which is what the gear next to it already says.
+pub(crate) const ICON_POWER: u16 = 0xE945;
 
 /// The glyph a sidebar entry leads with, by page index.
 /// The glyph for the appearance button: the mode it leads to.
@@ -556,6 +567,7 @@ mod tests {
             tile_violet: BLACK,
             tile_green: BLACK,
             tile_amber: BLACK,
+            tile_power: BLACK,
             edge: WHITE,
             field: BLACK,
             control: BLACK,

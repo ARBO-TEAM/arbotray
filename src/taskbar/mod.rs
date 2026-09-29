@@ -105,6 +105,14 @@ pub struct TrayModel {
     pub battery_text: String,
     /// `Plugged in` or `On battery`.
     pub power_text: String,
+    /// `24 W`, the package figure. Blank where the driver will not say.
+    pub cpu_w_text: String,
+    /// `63 W`, a discrete card's board power. Blank on a machine whose graphics
+    /// are on the processor die, where its draw is already inside `cpu_w_text`.
+    pub gpu_w_text: String,
+    /// `87 W`, the two above added up. Blank unless both are known — a total
+    /// over one of its two parts would read as the whole machine's draw.
+    pub power_total_text: String,
     /// `3d 4h`, at two units of precision.
     pub uptime_text: String,
     /// One entry per local volume, as `(mount, "210G free of 931G")`.
@@ -293,6 +301,16 @@ impl TrayModel {
             Some(false) => "On battery".into(),
             None => String::new(),
         };
+        // Wattage, when there is a driver to ask. Written as two fields plus
+        // their sum rather than one string, because the desktop widget's Power
+        // row wants the parts named and the Overview card wants the total.
+        if let Some(p) = &m.power {
+            out.cpu_w_text = p.cpu_w.map(format_watts).unwrap_or_default();
+            out.gpu_w_text = p.gpu_w.map(format_watts).unwrap_or_default();
+            out.power_total_text = power_total(p.cpu_w, p.gpu_w)
+                .map(format_watts)
+                .unwrap_or_default();
+        }
         out.uptime_text = sys.uptime_secs.map(format_uptime).unwrap_or_default();
         out.disks = sys
             .disks
@@ -528,6 +546,27 @@ pub fn format_cores(physical: Option<u32>, logical: Option<u32>) -> String {
         (Some(c), None) => c,
         (None, Some(t)) => t,
         (None, None) => String::new(),
+    }
+}
+
+/// A wattage as the page prints it. Whole watts: the driver's resolution is
+/// coarser than a decimal, and `24.0 W` claims a precision the reading does
+/// not have.
+pub fn format_watts(w: u32) -> String {
+    format!("{w} W")
+}
+
+/// What the two measured halves add up to, and nothing at all unless both are
+/// known.
+///
+/// The graphics half is already inside the processor figure when it shares the
+/// die, so the caller only offers a `gpu_w` that is a separate card — but a
+/// machine that answers one and not the other still has no total, because half
+/// a total is a smaller number wearing the word "total".
+pub fn power_total(cpu_w: Option<u32>, gpu_w: Option<u32>) -> Option<u32> {
+    match (cpu_w, gpu_w) {
+        (Some(c), Some(g)) => Some(c + g),
+        _ => None,
     }
 }
 

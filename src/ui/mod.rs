@@ -1510,6 +1510,9 @@ mod tests {
             gpu_text: "AMD Radeon RX 6600".into(),
             battery_text: "88%".into(),
             power_text: "Plugged in".into(),
+            cpu_w_text: "31 W".into(),
+            gpu_w_text: "54 W".into(),
+            power_total_text: "85 W".into(),
             uptime_text: "3d 4h".into(),
             // Two volumes, so the page's own tests see the multi-drive path
             // rather than the one-drive case that would pass either way.

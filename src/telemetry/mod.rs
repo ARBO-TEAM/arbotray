@@ -9,6 +9,7 @@ pub mod hardware;
 pub mod latency;
 pub mod network;
 pub mod ports;
+pub mod power;
 pub mod speedtest;
 pub mod system;
 pub mod usage;
@@ -19,6 +20,7 @@ pub use hardware::Hardware;
 pub use latency::Latency;
 pub use network::Network;
 pub use ports::Ports;
+pub use power::Power;
 pub use speedtest::SpeedTest;
 pub use system::SystemInfo;
 pub use usage::Usage;
@@ -37,6 +39,23 @@ pub struct HardwareSample {
     pub cpu_pct: f32,
     pub ram_used_bytes: u64,
     pub ram_total_bytes: u64,
+}
+
+/// What the machine is drawing, in whole watts.
+///
+/// Both halves are optional and independent: a GeForce card with an Intel
+/// processor has neither, and a machine the driver will not talk to has no
+/// sample at all. There is no `psu_w` field, and there is no API that would
+/// fill one — a desktop's wall draw is not visible from user mode, so the
+/// honest total is the sum of the parts that were measured.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PowerSample {
+    /// The processor package. On an APU this already includes its graphics
+    /// half, so it must not be added to `gpu_w` when the graphics are the
+    /// same die.
+    pub cpu_w: Option<u32>,
+    /// A discrete card's own board power.
+    pub gpu_w: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +200,9 @@ pub struct Metric {
     /// answer on any running machine, and a machine with nothing bound is a
     /// reading — zero — rather than a failure.
     pub ports: ports::PortsSample,
+    /// Absent on every machine that is not a Radeon, which is why it is the
+    /// only collector here whose absence drops a whole card.
+    pub power: Option<PowerSample>,
 }
 
 /// Owns every collector and polls them together, in the order the tray needs.
@@ -193,6 +215,7 @@ pub struct Sampler {
     pub adapter: Adapter,
     pub system: SystemInfo,
     pub ports: Ports,
+    pub power: Power,
 }
 
 impl Sampler {
@@ -205,6 +228,7 @@ impl Sampler {
             adapter: Adapter::new(),
             system: SystemInfo::new(),
             ports: Ports::new(),
+            power: Power::new(),
         }
     }
 
@@ -217,6 +241,7 @@ impl Sampler {
             adapter: self.adapter.poll(),
             system: self.system.poll(),
             ports: self.ports.poll(),
+            power: self.power.poll(),
         }
     }
 }

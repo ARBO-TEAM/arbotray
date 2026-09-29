@@ -35,6 +35,12 @@ is MIT licensed, along with `serde` and `serde_json` (MIT OR Apache-2.0). The
 release binary statically links them, so their notices are reproduced here
 rather than only in `Cargo.lock`.
 
+One component is neither linked nor ours: on a machine with a Radeon driver,
+the wattage card reads its numbers from `atiadlxx.dll`, the AMD Display Library
+that ships with the driver. It is loaded at runtime and never redistributed —
+the library is AMD's, under AMD's terms, and it is already installed by the
+driver before ArboTray is ever run.
+
 Everything else it talks to is the operating system: Win32 through the
 `windows` crate, and — for the speed test and the update check, both of which
 are only ever started on request — `speed.cloudflare.com` and `api.github.com`.

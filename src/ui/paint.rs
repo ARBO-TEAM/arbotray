@@ -13,7 +13,8 @@ use crate::ui::components::{
 use crate::ui::design::{
     CARD_PAD, FIELD_INSET, ICON_ABOUT, ICON_DATA, ICON_DESKTOP, ICON_LATENCY, ICON_LINK,
     ICON_LIVE, ICON_MACHINE,
-    ICON_MEMORY, ICON_NETWORK, ICON_PORTS, ICON_SPEED, ICON_STOPWATCH, ICON_STORAGE, ICON_TIMER,
+    ICON_MEMORY, ICON_NETWORK, ICON_PORTS, ICON_POWER, ICON_SPEED, ICON_STOPWATCH, ICON_STORAGE,
+    ICON_TIMER,
     ICON_TILES, ICON_TRAFFIC, ICON_TUNE, ICON_UP, ICON_DOWN, ICON_USAGE, RADIUS, S2, S3, palette,
 };
 use crate::power;
@@ -204,6 +205,37 @@ pub(crate) fn paint(hwnd: HWND, state: &mut UiState) {
                     c.card_head(dpi, ICON_USAGE, pal.tile_green, "Usage", lead);
                     for (label, value, tint) in &live {
                         c.meter(dpi, label, value, pct_of(value), *tint);
+                    }
+                });
+            }
+
+            // Power: what the machine is drawing, as wattage. Its own card
+            // rather than two more meters in Usage, because watts are not a
+            // proportion — a meter needs a whole to be a fraction of, and no
+            // machine here can name its own PSU. Absent on anything that is not
+            // a Radeon, which is why the whole card is conditional.
+            let watts = [
+                ("CPU", m.cpu_w_text.as_str()),
+                ("GPU", m.gpu_w_text.as_str()),
+            ];
+            let drawn: Vec<_> = watts.iter().filter(|w| !w.1.is_empty()).collect();
+            // Only when both halves are known: the sum of one part is not a
+            // total, and a row with a blank reading is dropped rather than
+            // drawn — the same rule the desktop widget's rows follow.
+            let total = !m.power_total_text.is_empty();
+            if !drawn.is_empty() {
+                let inner = head_h(dpi) + (drawn.len() + usize::from(total)) as i32 * row_h;
+                c.card(dpi, card_h(dpi, inner), |c| {
+                    c.card_head(dpi, ICON_POWER, pal.tile_power, "Power", &m.power_total_text);
+                    for (label, value) in &drawn {
+                        c.row(label, value);
+                    }
+                    // A row rather than the card's right-hand slot, so the
+                    // label every other row wears is not missing from the one
+                    // row that is a sum of the others. Last, because it is what
+                    // the rows above add up to.
+                    if total {
+                        c.row("Total", &m.power_total_text);
                     }
                 });
             }

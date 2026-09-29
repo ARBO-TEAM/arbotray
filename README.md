@@ -52,6 +52,7 @@ The binary lands at `target/release/arbotray.exe` (~485 KB).
 - **Download / upload rate** — IP Helper octet counters over the live hardware interfaces, delta per second
 - **Gateway latency** — ICMP probe every 3 s, cached between probes
 - **CPU and RAM** — `GetSystemTimes` and `GlobalMemoryStatusEx`
+- **Power draw** — CPU and GPU wattage on the Overview page, read from the Radeon driver (`atiadlxx.dll`), so it appears on AMD machines only. Total sums the parts that can be measured and is not a PSU figure
 - **Wi-Fi band and signal** — WLAN API, e.g. `5G 78%`
 - **Today's data usage** — running total, in the taskbar and in the icon tooltip. On by default, with no setup needed: it is the reading a metered connection most needs in front of it
 - **Mini-sparkline** — recent download throughput
@@ -125,6 +126,7 @@ A named mutex (`ArboTray.SingleInstance`) guards against a second copy.
 - 6 GHz Wi-Fi detection: the WLAN API exposes only a channel number, whose ranges collide between the 5 and 6 GHz bands; only channels above 177 are classified as 6 GHz.
 - Data usage is machine-wide. Windows exposes no per-process byte counter without ETW, so there is no per-app breakdown.
 - If Explorer restarts, the tray exits cleanly; re-attaching to the new taskbar is not implemented.
+- PSU and wall-socket draw are not available, because Windows exposes no API for them: the `Power Meter` performance-counter set is where that figure would be read, and it has no instances on a desktop, where there is no battery to meter. The wattage on the Overview page is the sum of the parts the driver reports, not the whole machine.
 
 ## CI
 

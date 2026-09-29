@@ -1,12 +1,12 @@
 # ArboTray Feature Status
 
-Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.11.0** (`Cargo.toml:3`) — refreshed 2026-09-18. The previous revision covered v0.10.0.
+Audit of the feature list in `docs/IMPROVE.md` against the source tree of **arbotray v0.12.0** (`Cargo.toml:3`) — refreshed 2026-09-29. The previous revision covered v0.11.0.
 
 All features are available to every user — there is no free tier, no premium tier, and no licence gate.
 
 Every row below was verified against working code. A config field, a struct field or a TODO comment is not counted as a feature: **Done** means a user can see or use it today.
 
-Tree today: 19,889 lines of Rust across `src/`, **272 tests passing, 2 ignored**.
+Tree today: 20,274 lines of Rust across `src/`, **276 tests passing, 2 ignored**.
 
 ## Summary
 
@@ -34,8 +34,9 @@ Tree today: 19,889 lines of Rust across `src/`, **272 tests passing, 2 ignored**
 | Update check | Done | `src/update.rs` — background check, version on the System page's "This machine" card, banner when a newer release exists |
 | Start with Windows | Done | `ROW_STARTUP` toggle writing the `Run` key |
 | Tray Notifications | Done | `Notify` config, `alert::Alerts` engine (quota threshold + rate rising-edge), `Icon::balloon` via `NIF_INFO`, Settings rows in Preferences card |
+| Power consumption | Done | `src/telemetry/power.rs` reads `ADL_PMLOG_ASIC_POWER` from `atiadlxx.dll`; the "Power" card on the Overview page (`src/ui/paint.rs:212-241`) shows CPU, GPU and Total |
 
-Counts: **17 Done, 1 Partial, 4 Not done** — 22 rows, counted from the table above, which is the authority.
+Counts: **18 Done, 1 Partial, 4 Not done** — 23 rows, counted from the table above, which is the authority.
 
 The ten pages are `Overview` (0), `Network` (1), `System` (2), `Data` (3), `Ports` (4), `Speed Test` (5), `Stopwatch` (6), `Timer` (7), `Settings` (8), `About` (9). The `OVERVIEW`/`NETWORK`/…/`ABOUT` constants are **positional**, so a new page must be *appended* to `PAGES` — inserting one renumbers every page after it, and the labels would still read correctly while the routing broke. The window's `MIN_H` is derived from this list rather than written beside it: the tenth page overran the old literal floor and left the last entry under the frame.
 
@@ -93,7 +94,16 @@ Nothing fires without being asked. A minute before the instant the popup comes u
 A timer whose moment passed while the machine was asleep is dropped with a note rather than fired at — that is what the engine's five-minute grace window is for.
 
 ### Update check
-`src/update.rs`: a background check that never blocks a paint, the version printed as a `Version` row on the System page's "This machine" card (`update::current()`, i.e. `CARGO_PKG_VERSION`, now `0.11.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
+`src/update.rs`: a background check that never blocks a paint, the version printed as a `Version` row on the System page's "This machine" card (`update::current()`, i.e. `CARGO_PKG_VERSION`, now `0.12.0`), and a banner naming the newer release and where to get it. No auto-install — the app tells, the user decides.
+
+### Power consumption
+`src/telemetry/power.rs` reads wattage from AMD's `atiadlxx.dll` — the driver's own library, the same PMLog telemetry the Radeon overlay draws. It is loaded at runtime rather than linked, because the DLL is absent on a machine with no Radeon driver and a monitor that refuses to start is worse than one with a missing card. That also means no new crate and no linked dependency.
+
+The sensor is `ADL_PMLOG_ASIC_POWER` (index 23), which is the one entry meaning the same thing on both kinds of adapter: on an APU it is the processor package's draw, and on a discrete card it is the board power. Which of the two it is comes from the fan-speed sensor, whose *presence* is the tell — only a card with a fan on it reports one. On the author machine, a Ryzen 5 7600 APU beside a Radeon RX 6600, it reads about 42 W for the CPU and 3 W for the GPU at idle, and the CPU around 58 W under an all-core load.
+
+The Overview page's "Power" card shows CPU, GPU and Total, with the total in the card's right-hand slot, and no such card at all on a machine that is not a Radeon. On an APU the graphics share the processor die, so the package figure already contains them and the two are never double-counted.
+
+No PSU figure is shown, and none can be. Windows exposes no API for wall draw: the `Power Meter` performance-counter set is where that number would be read, and on a desktop it has zero instances, there being no battery to meter. The app therefore reports the sum of the parts the driver can actually measure and prints nothing for the rest. Only AMD is covered; NVML is the equivalent for a GeForce card, a second DLL behind the same shape if one ever turns up.
 
 ## Partial
 
